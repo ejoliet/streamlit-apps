@@ -1,0 +1,11 @@
+[server]
+# Maximum upload size in MB
+maxUploadSize = 600
+
+[client]
+# Show detailed error messages
+showErrorDetails = true
+
+[runner]
+# Faster reruns
+fastReruns = true
