@@ -24,6 +24,29 @@ def _build_headers(token: str, accept_preview: bool = False) -> Dict[str, str]:
     return headers
 
 
+def _get_query_params() -> Dict[str, List[str]]:
+    params_accessor = getattr(st, "query_params", None)
+    if params_accessor is not None:
+        return {
+            key: value if isinstance(value, list) else [value]
+            for key, value in dict(params_accessor).items()
+        }
+    legacy_getter = getattr(st, "experimental_get_query_params", None)
+    if legacy_getter:
+        return legacy_getter()
+    return {}
+
+
+def _clear_query_params() -> None:
+    params_accessor = getattr(st, "query_params", None)
+    if params_accessor is not None:
+        params_accessor.clear()
+        return
+    legacy_setter = getattr(st, "experimental_set_query_params", None)
+    if legacy_setter:
+        legacy_setter()
+
+
 def _exchange_code_for_token(code: str) -> Optional[str]:
     payload = {
         "client_id": CLIENT_ID,
@@ -150,7 +173,7 @@ def _decode_markdown(content: Optional[str], encoding: Optional[str]) -> Optiona
 
 
 def _handle_oauth_callback() -> None:
-    params = st.experimental_get_query_params()
+    params = _get_query_params()
     if "code" not in params:
         return
 
@@ -165,7 +188,7 @@ def _handle_oauth_callback() -> None:
     if token:
         st.session_state["access_token"] = token
         st.session_state["oauth_state"] = None
-        st.experimental_set_query_params()
+        _clear_query_params()
 
 
 def _login_view() -> None:
