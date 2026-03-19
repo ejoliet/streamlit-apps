@@ -23,7 +23,7 @@ DOC_FILENAME_PATTERN = re.compile(r"^SSC_D-([dmt])(\d{3})\.(md|docx|pdf)$", re.I
 
 
 class GitHubAPIError(RuntimeError):
-    pass
+    """Raised when the GitHub API returns an error response."""
 
 
 if st is not None:
@@ -35,20 +35,6 @@ else:
 
 def normalize_path(path: str) -> str:
     return path.strip().strip("/")
-
-
-def get_http_session() -> requests.Session:
-    session = requests.Session()
-    retries = Retry(
-        total=3,
-        backoff_factor=0.3,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"],
-    )
-    adapter = HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
-    return session
 
 
 def get_token(
@@ -77,6 +63,20 @@ def get_token(
     return None
 
 
+def get_http_session() -> requests.Session:
+    session = requests.Session()
+    retries = Retry(
+        total=3,
+        backoff_factor=0.3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
 def gh_get(
     path: str,
     token: str,
@@ -95,12 +95,14 @@ def gh_get(
 def ensure_ok(response: requests.Response, context: str) -> None:
     if response.ok:
         return
+
     detail = ""
     try:
         payload = response.json()
         detail = payload.get("message", "") if isinstance(payload, dict) else str(payload)
     except Exception:
         detail = response.text[:300]
+
     raise GitHubAPIError(f"{context} failed ({response.status_code}): {detail}")
 
 
@@ -188,6 +190,7 @@ def fetch_file_content(token: str, owner: str, repo: str, path: str, ref: Option
         raw = session.get(download_url, timeout=20)
         if raw.ok:
             return raw.content
+
     raise GitHubAPIError(f"Fetch file {path} failed: file content unavailable")
 
 
@@ -312,35 +315,40 @@ def choose_main_document(repo_name: str, files: List[Dict[str, Any]]) -> Optiona
     )
     if pdf_candidates:
         return pdf_candidates[0]
+
     return None
 
 
 def version_sort_key(name: str) -> Tuple[int, int, str]:
     lowered = name.lower()
     if lowered == "main":
-        return 0, 0, lowered
+        return (0, 0, lowered)
     numeric_match = re.search(r"(\d+)(?:\.(\d+))?(?:\.(\d+))?", lowered)
     if numeric_match:
         major = int(numeric_match.group(1) or 0)
         minor = int(numeric_match.group(2) or 0)
         patch = int(numeric_match.group(3) or 0)
-        return 1, major * 1000000 + minor * 1000 + patch, lowered
-    return 2, 0, lowered
+        return (1, major * 1000000 + minor * 1000 + patch, lowered)
+    return (2, 0, lowered)
 
 
 def build_version_options(default_branch: str, branches: List[Dict[str, Any]], tags: List[Dict[str, Any]]) -> List[str]:
     options: List[str] = []
     seen = set()
+
     preferred_main = default_branch or "main"
     if preferred_main not in seen:
         options.append(preferred_main)
         seen.add(preferred_main)
+
     branch_names = sorted([str(b.get("name", "")) for b in branches if b.get("name")], key=version_sort_key, reverse=True)
     tag_names = sorted([str(t.get("name", "")) for t in tags if t.get("name")], key=version_sort_key, reverse=True)
+
     for name in tag_names + branch_names:
         if name and name not in seen:
             options.append(name)
             seen.add(name)
+
     return options
 
 
@@ -359,9 +367,11 @@ def select_default_version(default_branch: str, options: List[str], tags: List[D
 def render_document(token: str, owner: str, repo_name: str, ref: str, doc_item: Dict[str, Any]) -> None:
     if st is None:
         return
+
     doc_name = str(doc_item.get("name", ""))
     doc_path = str(doc_item.get("path", doc_name))
     lowered = doc_name.lower()
+
     try:
         content = fetch_file_content(token, owner, repo_name, doc_path, ref=ref)
     except GitHubAPIError as e:
@@ -370,6 +380,7 @@ def render_document(token: str, owner: str, repo_name: str, ref: str, doc_item: 
 
     st.subheader(doc_name)
     st.caption(f"Reference: {ref}")
+
     if lowered.endswith(".md"):
         try:
             st.markdown(content.decode("utf-8"))
@@ -390,12 +401,14 @@ def render_document(token: str, owner: str, repo_name: str, ref: str, doc_item: 
 
 
 def render_missing_streamlit_message() -> None:
-    print(
-        "This file defines a Streamlit app, but Streamlit is not installed.\n\n"
-        "Install dependencies and run:\n"
+    message = (
+        "This file defines a Streamlit app, but Streamlit is not installed in the current Python environment.\n\n"
+        "Install dependencies and run the app with:\n"
         "  pip install streamlit requests\n"
-        "  streamlit run app.py"
+        "  streamlit run streamlit_github_repo_navigator_friendly.py\n\n"
+        "The module no longer crashes on import without Streamlit, which makes it testable in constrained environments."
     )
+    print(message)
 
 
 def run_streamlit_app() -> None:
@@ -408,29 +421,49 @@ def run_streamlit_app() -> None:
     st.caption("Documentation-first GitHub browser with default filtering on the roman-docs topic.")
 
     with st.sidebar:
-        st.header("Authentication")
-        st.warning(
-        "This app cannot directly reuse GitHub credentials already stored for github.com in your browser. "
-        "Use a token passed to the app via sidebar input, environment variable, or URL query parameter."
+        st.header("Search")
+        st.caption("Use the filters below to find documentation quickly.")
+        only_docs = st.checkbox("Only documentation repos", value=True)
+        query = st.text_input(
+            "Search repositories or titles",
+            value="",
+            placeholder="Type repo name, title, or keyword",
         )
-        token_input = st.text_input("GitHub token", type="password", help="Needs repo access token for private repositories.")
-        if token_input:
-            st.session_state["github_token"] = token_input.strip()
-        if st.button("Clear token"):
-            st.session_state.pop("github_token", None)
-            st.query_params.clear()
-            st.rerun()
-        st.markdown("### Token sources")
-        st.code(
-            "1. Sidebar input\n"
-            "2. URL: ?token=ghp_xxx\n"
-            "3. Env: GITHUB_TOKEN",
-            language="text",
-        )        
+        repo_visibility = st.selectbox("Visibility", ["all", "public", "private"], index=0)
+        archived_mode = st.selectbox("Archived", ["exclude", "only", "include"], index=0)
+        affiliation = st.multiselect(
+            "Affiliation",
+            ["owner", "collaborator", "organization_member"],
+            default=["owner", "collaborator", "organization_member"],
+        )
+
+        with st.expander("Authentication", expanded=False):
+            st.warning(
+                "This app cannot directly reuse GitHub credentials already stored for github.com in your browser. "
+                "Use a token passed to the app via sidebar input, environment variable, or URL query parameter."
+            )
+            token_input = st.text_input(
+                "GitHub token",
+                type="password",
+                help="Needs repo access token for private repositories.",
+            )
+            if token_input:
+                st.session_state["github_token"] = token_input.strip()
+            if st.button("Clear token"):
+                st.session_state.pop("github_token", None)
+                st.query_params.clear()
+                st.rerun()
+            st.markdown("### Token sources")
+            st.code(
+                "1. Sidebar input\n"
+                "2. URL: ?token=ghp_xxx\n"
+                "3. Env: GITHUB_TOKEN",
+                language="text",
+            )
 
     token = get_token(session_state=st.session_state, query_params=st.query_params)
     if not token:
-        st.info("Provide a GitHub token to continue: either in the side bar or use \"?token=YOUR_TOKEN\" in the URL.")
+        st.info("Open Authentication in the sidebar and provide a GitHub token to continue.")
         st.stop()
 
     try:
@@ -440,18 +473,6 @@ def run_streamlit_app() -> None:
         st.stop()
 
     st.success(f"Authenticated as {user.get('login')}")
-
-    with st.sidebar:
-        st.header("Repository filters")
-        only_docs = st.checkbox("Only documentation repos", value=True)
-        query = st.text_input("Search repositories or titles", value="")
-        repo_visibility = st.selectbox("Visibility", ["all", "public", "private"], index=0)
-        archived_mode = st.selectbox("Archived", ["exclude", "only", "include"], index=0)
-        affiliation = st.multiselect(
-            "Affiliation",
-            ["owner", "collaborator", "organization_member"],
-            default=["owner", "collaborator", "organization_member"],
-        )
 
     try:
         repos = fetch_repos(token, affiliation=",".join(affiliation))
@@ -469,6 +490,7 @@ def run_streamlit_app() -> None:
         archived_mode=archived_mode,
         required_topic=DEFAULT_DOC_TOPIC if only_docs else None,
     )
+
     repo_options = {str(repo["full_name"]): repo for repo in filtered if "full_name" in repo}
     repo_names = list(repo_options.keys())
 
@@ -476,7 +498,7 @@ def run_streamlit_app() -> None:
         st.warning("No repositories matched the current filters.")
         st.stop()
 
-    st.subheader(f"Documentation repositories ({len(repo_names)})" if only_docs else f"Repositories ({len(repo_names)})")
+    st.subheader("Repository selection")
     repo_labels = {full_name: build_repo_display_label(repo_options[full_name]) for full_name in repo_names}
     label_to_full_name = {label: full_name for full_name, label in repo_labels.items()}
     sorted_labels = sorted(repo_labels.values(), key=lambda s: s.lower())
@@ -489,7 +511,6 @@ def run_streamlit_app() -> None:
     )
     selected_repo_name = label_to_full_name[selected_label]
     repo = repo_options[selected_repo_name]
-
     owner = str(repo["owner"]["login"])
     repo_name = str(repo["name"])
     default_branch = str(repo.get("default_branch") or "main")
@@ -498,6 +519,7 @@ def run_streamlit_app() -> None:
         tags = fetch_tags(token, owner, repo_name)
     except GitHubAPIError:
         tags = []
+
     try:
         branches = fetch_branches(token, owner, repo_name)
     except GitHubAPIError:
@@ -533,46 +555,16 @@ def run_streamlit_app() -> None:
     main_doc = choose_main_document(repo_name, current_files)
     if not main_doc:
         st.warning("No main document could be inferred for this repository and version.")
-        st.write(sorted([str(item.get("name", "")) for item in current_files]))
+        available_files = [str(item.get("name", "")) for item in current_files]
+        if available_files:
+            st.write("Available root files:")
+            st.write(sorted(available_files))
         st.stop()
 
     render_document(token, owner, repo_name, selected_version, main_doc)
 
 
 class RepoNavigatorTests(unittest.TestCase):
-    def test_infer_main_document_name(self) -> None:
-        self.assertEqual(
-            infer_main_document_name("roman-ssc_d-m007"),
-            ["SSC_D-M007.md", "SSC_D-M007.docx", "SSC_D-M007.pdf"],
-        )
-
-    def test_choose_main_document_prefers_inferred_file_case_insensitive(self) -> None:
-        files = [
-            {"name": "README.md", "type": "file"},
-            {"name": "SSC_D-m007.md", "type": "file"},
-            {"name": "notes.pdf", "type": "file"},
-        ]
-        picked = choose_main_document("roman-ssc_d-m007", files)
-        self.assertIsNotNone(picked)
-        self.assertEqual(picked["name"], "SSC_D-m007.md")
-
-    def test_choose_main_document_prefers_docx_over_pdf_for_pattern_match(self) -> None:
-        files = [
-            {"name": "SSC_D-M013.pdf", "type": "file"},
-            {"name": "SSC_D-m013.docx", "type": "file"},
-        ]
-        picked = choose_main_document("roman-ssc_d-m013", files)
-        self.assertIsNotNone(picked)
-        self.assertEqual(picked["name"], "SSC_D-m013.docx")
-
-    def test_build_repo_display_label_uses_title_or_description(self) -> None:
-        repo = {
-            "full_name": "org/roman-ssc_d-m013",
-            "title": "M013 Main Operations Guide",
-            "description": "fallback description",
-        }
-        self.assertIn("M013 Main Operations Guide", build_repo_display_label(repo))
-
     def test_precompute_repo_search_text_uses_title(self) -> None:
         repo = {
             "full_name": "org/roman-ssc_d-m013",
@@ -585,6 +577,38 @@ class RepoNavigatorTests(unittest.TestCase):
         text = precompute_repo_search_text(repo)
         self.assertIn("m013 main operations guide", text)
         self.assertIn("roman-docs", text)
+
+    def test_infer_main_document_name(self) -> None:
+        self.assertEqual(
+            infer_main_document_name("roman-ssc_d-m007"),
+            ["SSC_D-M007.md", "SSC_D-M007.docx", "SSC_D-M007.pdf"],
+        )
+
+    def test_choose_main_document_prefers_case_insensitive_match(self) -> None:
+        files = [
+            {"name": "README.md", "type": "file"},
+            {"name": "SSC_D-m007.md", "type": "file"},
+        ]
+        picked = choose_main_document("roman-ssc_d-m007", files)
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked["name"], "SSC_D-m007.md")
+
+    def test_choose_main_document_prefers_docx_before_pdf(self) -> None:
+        files = [
+            {"name": "SSC_D-M013.pdf", "type": "file"},
+            {"name": "SSC_D-m013.docx", "type": "file"},
+        ]
+        picked = choose_main_document("roman-ssc_d-m013", files)
+        self.assertIsNotNone(picked)
+        self.assertEqual(picked["name"], "SSC_D-m013.docx")
+
+    def test_build_repo_display_label_uses_title(self) -> None:
+        repo = {
+            "full_name": "org/roman-ssc_d-m013",
+            "title": "M013 Main Operations Guide",
+            "description": "fallback description",
+        }
+        self.assertIn("M013 Main Operations Guide", build_repo_display_label(repo))
 
 
 if __name__ == "__main__":
