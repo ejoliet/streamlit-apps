@@ -211,11 +211,37 @@ def flatten_files(contents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [item for item in contents if item.get("type") == "file" and item.get("name")]
 
 
+DOC_FILENAME_PATTERN = re.compile(r"^SSC_D-([dmt])(\d{3})\.(md|docx|pdf)$", re.IGNORECASE)
+
+def infer_repo_doc_parts(repo_name: str) -> Optional[Tuple[str, str]]:
+    match = REPO_DOC_PATTERN.match(repo_name)
+    if not match:
+        return None
+    letter, number = match.groups()
+    return (letter.lower(), number)
+
 def choose_main_document(repo_name: str, files: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    by_name = {str(item.get("name")): item for item in files}
-    for candidate in infer_main_document_name(repo_name):
-        if candidate in by_name:
-            return by_name[candidate]
+    parts = infer_repo_doc_parts(repo_name)
+    if parts:
+        target_letter, target_number = parts
+        exact_matches: List[Dict[str, Any]] = []
+        for item in files:
+            name = str(item.get("name", ""))
+            match = DOC_FILENAME_PATTERN.match(name)
+            if not match:
+                continue
+            letter, number, _extension = match.groups()
+            if letter.lower() == target_letter and number == target_number:
+                exact_matches.append(item)
+
+        extension_priority = {"md": 0, "docx": 1, "pdf": 2}
+        if exact_matches:
+            exact_matches.sort(
+                key=lambda item: extension_priority.get(
+                    str(item.get("name", "")).split(".")[-1].lower(), 99
+                )
+            )
+            return exact_matches[0]
 
     md_candidates = sorted(
         [item for item in files if str(item.get("name", "")).lower().endswith(".md")],
@@ -224,19 +250,19 @@ def choose_main_document(repo_name: str, files: List[Dict[str, Any]]) -> Optiona
     if md_candidates:
         return md_candidates[0]
 
-    pdf_candidates = sorted(
-        [item for item in files if str(item.get("name", "")).lower().endswith(".pdf")],
-        key=lambda item: str(item.get("name", "")).lower(),
-    )
-    if pdf_candidates:
-        return pdf_candidates[0]
-
     docx_candidates = sorted(
         [item for item in files if str(item.get("name", "")).lower().endswith(".docx")],
         key=lambda item: str(item.get("name", "")).lower(),
     )
     if docx_candidates:
         return docx_candidates[0]
+
+    pdf_candidates = sorted(
+        [item for item in files if str(item.get("name", "")).lower().endswith(".pdf")],
+        key=lambda item: str(item.get("name", "")).lower(),
+    )
+    if pdf_candidates:
+        return pdf_candidates[0]
 
     return None
 
@@ -417,7 +443,18 @@ def run_streamlit_app() -> None:
         st.stop()
 
     st.subheader("Repository selection")
-    selected_repo_name = st.selectbox("Documentation repository", repo_names)
+    repo_labels = {full_name: build_repo_display_label(repo_options[full_name]) for full_name in repo_names}
+    label_to_full_name = {label: full_name for full_name, label in repo_labels.items()}
+    sorted_labels = sorted(repo_labels.values(), key=lambda s: s.lower())
+
+    selected_label = st.selectbox(
+        "Documentation repository",
+        sorted_labels,
+        index=0,
+        help="Autocomplete works by typing part of the repository name or inferred title.",
+    )
+    selected_repo_name = label_to_full_name[selected_label]
+    # selected_repo_name = st.selectbox("Documentation repository", repo_names)
     repo = repo_options[selected_repo_name]
     owner = repo["owner"]["login"]
     repo_name = repo["name"]
@@ -556,6 +593,38 @@ class RepoNavigatorTests(unittest.TestCase):
         options = build_version_options("main", branches=[{"name": "develop"}], tags=[])
         self.assertEqual(select_default_version("main", options, []), "main")
 
+def build_repo_display_label(repo: Dict[str, Any]) -> str:
+    title = str(repo.get("title") or "").strip()
+    description = str(repo.get("description") or "").strip()
+    label_title = title or description
+    if label_title:
+        compact = re.sub(r"\s+", " ", label_title)
+        return f"{repo.get('full_name')} — {compact}"
+    return str(repo.get("full_name", repo.get("name", "repository")))
+
+def extract_repo_title(repo: Dict[str, Any]) -> str:
+    title = str(repo.get("title") or "").strip()
+    if title:
+        return title
+    description = str(repo.get("description") or "").strip()
+    if description:
+        first = re.split(r"[\n\r\.!?]", description)[0].strip()
+        return first or str(repo.get("name", ""))
+    return str(repo.get("name", "")).strip()
+
+def repo_matches(repo: Dict[str, Any], text: str) -> bool:
+    haystack = " ".join(
+        [
+            str(repo.get("full_name", "")),
+            str(repo.get("name", "")),
+            str(repo.get("title", "")),
+            extract_repo_title(repo),
+            str(repo.get("description") or ""),
+            str(repo.get("language") or ""),
+            " ".join(str(topic) for topic in repo.get("topics", [])),
+        ]
+    ).lower()
+    return text.lower() in haystack
 
 if __name__ == "__main__":
     if "--test" in sys.argv:
