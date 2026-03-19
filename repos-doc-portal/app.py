@@ -394,7 +394,7 @@ def render_missing_streamlit_message() -> None:
         "This file defines a Streamlit app, but Streamlit is not installed.\n\n"
         "Install dependencies and run:\n"
         "  pip install streamlit requests\n"
-        "  streamlit run streamlit_github_repo_navigator_app_v2.py"
+        "  streamlit run app.py"
     )
 
 
@@ -409,17 +409,28 @@ def run_streamlit_app() -> None:
 
     with st.sidebar:
         st.header("Authentication")
-        token_input = st.text_input("GitHub token", type="password", help="Needs repo access for private repositories.")
+        st.warning(
+        "This app cannot directly reuse GitHub credentials already stored for github.com in your browser. "
+        "Use a token passed to the app via sidebar input, environment variable, or URL query parameter."
+        )
+        token_input = st.text_input("GitHub token", type="password", help="Needs repo access token for private repositories.")
         if token_input:
             st.session_state["github_token"] = token_input.strip()
         if st.button("Clear token"):
             st.session_state.pop("github_token", None)
             st.query_params.clear()
             st.rerun()
+        st.markdown("### Token sources")
+        st.code(
+            "1. Sidebar input\n"
+            "2. URL: ?token=ghp_xxx\n"
+            "3. Env: GITHUB_TOKEN",
+            language="text",
+        )        
 
     token = get_token(session_state=st.session_state, query_params=st.query_params)
     if not token:
-        st.info("Provide a GitHub token to continue.")
+        st.info("Provide a GitHub token to continue: either in the side bar or use \"?token=YOUR_TOKEN\" in the URL.")
         st.stop()
 
     try:
