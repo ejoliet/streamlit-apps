@@ -28,14 +28,15 @@ from datetime import date
 
 APP_TITLE = "DayLog — Local-first Journal"
 DB_PATH = os.environ.get("JOURNAL_DB_PATH", "journal.db")
+JOURNAL_DB_DIR = os.environ.get("JOURNAL_DB_DIR", None)
 
 MOODS = ["", "😀 Great", "🙂 Good", "😐 Okay", "🙁 Low", "😣 Stressed", "😴 Tired"]
 
 # -----------------------------
 # SQLite
 # -----------------------------
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+def get_conn(path: str = DB_PATH):
+    conn = sqlite3.connect(path, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL;")
     return conn
 
@@ -368,27 +369,75 @@ def zip_db(db_path: str) -> bytes:
 # -----------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 st.title(APP_TITLE)
-st.caption("Local-first journaling: everything stored in a local SQLite file (journal.db).")
-
-conn = get_conn()
-init_db(conn)
 
 # Session state
+if "active_db_path" not in st.session_state:
+    st.session_state["active_db_path"] = DB_PATH
 if "selected_day" not in st.session_state:
     st.session_state["selected_day"] = date.today()
 if "loc" not in st.session_state:
     st.session_state["loc"] = ip_geolocate()  # best-effort
 
-# Sidebar: backups + location
+active_db_path = st.session_state["active_db_path"]
+st.caption(f"Local-first journaling: database → `{active_db_path}`")
+
+conn = get_conn(active_db_path)
+init_db(conn)
+
+# Sidebar: database selection + backups + location
 st.sidebar.header("Local-first")
-if os.path.exists(DB_PATH):
+
+# --- DB selector (only shown when JOURNAL_DB_DIR is set) ---
+if JOURNAL_DB_DIR and os.path.isdir(JOURNAL_DB_DIR):
+    db_files = sorted(
+        os.path.join(JOURNAL_DB_DIR, f)
+        for f in os.listdir(JOURNAL_DB_DIR)
+        if f.endswith(".db")
+    )
+    if not db_files:
+        st.sidebar.info(f"No .db files found in {JOURNAL_DB_DIR}.")
+    else:
+        current_idx = db_files.index(active_db_path) if active_db_path in db_files else 0
+        chosen = st.sidebar.selectbox(
+            "Journal database",
+            db_files,
+            index=current_idx,
+            format_func=os.path.basename,
+        )
+        if chosen != active_db_path:
+            conn.close()
+            st.session_state["active_db_path"] = chosen
+            st.rerun()
+
+if os.path.exists(active_db_path):
     st.sidebar.download_button(
         "Download backup (journal.db.zip)",
-        data=zip_db(DB_PATH),
-        file_name="journal.db.zip",
+        data=zip_db(active_db_path),
+        file_name=os.path.basename(active_db_path) + ".zip",
         mime="application/zip",
         use_container_width=True,
     )
+
+with st.sidebar.expander("Restore from backup"):
+    uploaded_db = st.file_uploader(
+        "Upload journal.db or journal.db.zip",
+        type=["db", "zip"],
+        key="restore_upload",
+    )
+    if uploaded_db and st.button("Restore", use_container_width=True):
+        raw = uploaded_db.read()
+        if uploaded_db.name.endswith(".zip"):
+            with zipfile.ZipFile(io.BytesIO(raw)) as z:
+                db_names = [n for n in z.namelist() if n.endswith(".db")]
+                if not db_names:
+                    st.sidebar.error("No .db file found inside the zip.")
+                    st.stop()
+                raw = z.read(db_names[0])
+        conn.close()
+        with open(active_db_path, "wb") as f:
+            f.write(raw)
+        st.sidebar.success("Database restored. Reloading…")
+        st.rerun()
 
 st.sidebar.header("Weather location")
 loc = st.session_state["loc"]
