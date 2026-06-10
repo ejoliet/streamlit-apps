@@ -218,225 +218,231 @@ with tabs[0]:
     bucket = st.session_state.bucket
     if not bucket:
         st.info("Pick a bucket in the sidebar and click **Open bucket**.")
-        st.stop()
+    else:
+        client = get_client(st.session_state.anonymous)
+        path_prefix = st.session_state.path_prefix
+        st.markdown(f"#### `s3://{bucket}/{path_prefix}`")
 
-    client = get_client(st.session_state.anonymous)
-    path_prefix = st.session_state.path_prefix
-    st.markdown(f"#### `s3://{bucket}/{path_prefix}`")
+        # Breadcrumbs
+        crumbs = [("🪣 root", "")]
+        acc = ""
+        for part in path_prefix.rstrip("/").split("/"):
+            if part:
+                acc += part + "/"
+                crumbs.append((part, acc))
+        crumb_cols = st.columns([1] * len(crumbs) + [max(1, 10 - len(crumbs))])
+        for i, (label, prefix) in enumerate(crumbs):
+            if crumb_cols[i].button(label, key=f"crumb_{i}"):
+                go_to(prefix)
 
-    # Breadcrumbs
-    crumbs = [("🪣 root", "")]
-    acc = ""
-    for part in path_prefix.rstrip("/").split("/"):
-        if part:
-            acc += part + "/"
-            crumbs.append((part, acc))
-    crumb_cols = st.columns([1] * len(crumbs) + [max(1, 10 - len(crumbs))])
-    for i, (label, prefix) in enumerate(crumbs):
-        if crumb_cols[i].button(label, key=f"crumb_{i}"):
-            go_to(prefix)
-
-    # Filter + pagination controls
-    fcol, mcol, pcol = st.columns([5, 2, 2])
-    with fcol:
-        filter_text = st.text_input(
-            "Filter by filename",
-            value=st.session_state.filter_text,
-            placeholder="filter by filename…",
-            label_visibility="collapsed",
-        )
-    with mcol:
-        filter_mode = st.selectbox(
-            "Filter mode",
-            ["starts with", "contains"],
-            index=["starts with", "contains"].index(st.session_state.filter_mode),
-            label_visibility="collapsed",
-            help="'starts with' filters server-side (efficient, paginates the whole "
-            "bucket). 'contains' filters the current page only.",
-        )
-    if filter_text != st.session_state.filter_text or filter_mode != st.session_state.filter_mode:
-        st.session_state.filter_text = filter_text
-        st.session_state.filter_mode = filter_mode
-        reset_pagination()
-        st.rerun()
-
-    server_prefix = path_prefix + (filter_text if filter_mode == "starts with" else "")
-
-    try:
-        resp = list_page(bucket, server_prefix, int(st.session_state.page_size), st.session_state.token)
-    except ClientError as exc:
-        st.error(f"S3 error: {aws_error(exc)}")
-        st.stop()
-    except Exception as exc:
-        st.error(f"Could not list bucket: {exc}")
-        st.stop()
-
-    next_token = resp.get("NextContinuationToken")
-    has_prev = bool(st.session_state.token_stack)
-    with pcol:
-        b1, b2 = st.columns(2)
-        if b1.button("◀ Prev", disabled=not has_prev, use_container_width=True):
-            st.session_state.token = st.session_state.token_stack.pop()
-            st.rerun()
-        if b2.button("Next ▶", disabled=not next_token, use_container_width=True):
-            st.session_state.token_stack.append(st.session_state.token)
-            st.session_state.token = next_token
+        # Filter + pagination controls
+        fcol, mcol, pcol = st.columns([5, 2, 2])
+        with fcol:
+            filter_text = st.text_input(
+                "Filter by filename",
+                value=st.session_state.filter_text,
+                placeholder="filter by filename…",
+                label_visibility="collapsed",
+            )
+        with mcol:
+            filter_mode = st.selectbox(
+                "Filter mode",
+                ["starts with", "contains"],
+                index=["starts with", "contains"].index(st.session_state.filter_mode),
+                label_visibility="collapsed",
+                help="'starts with' filters server-side (efficient, paginates the whole "
+                "bucket). 'contains' filters the current page only.",
+            )
+        if filter_text != st.session_state.filter_text or filter_mode != st.session_state.filter_mode:
+            st.session_state.filter_text = filter_text
+            st.session_state.filter_mode = filter_mode
+            reset_pagination()
             st.rerun()
 
-    # Parse rows
-    folders = []
-    for cp in resp.get("CommonPrefixes", []):
-        full = cp["Prefix"]
-        folders.append({"name": full[len(path_prefix):], "prefix": full})
+        server_prefix = path_prefix + (filter_text if filter_mode == "starts with" else "")
 
-    files = []
-    for obj in resp.get("Contents", []):
-        key = obj["Key"]
-        if key.endswith("/") and obj["Size"] == 0:
-            continue  # folder marker
-        name = key[len(path_prefix):]
-        if filter_mode == "contains" and filter_text and filter_text.lower() not in name.lower():
-            continue
-        files.append(
-            {
-                "name": name,
-                "key": key,
-                "size": obj["Size"],
-                "modified": obj["LastModified"].replace(tzinfo=None),
-            }
-        )
-
-    # Write-role toolbar
-    if can_write:
-        with st.expander("✏️ Write actions (upload / new folder)"):
-            up_col, folder_col = st.columns(2)
-            with up_col:
-                uploads = st.file_uploader("Upload files here", accept_multiple_files=True)
-                if uploads and st.button("Upload", type="primary"):
-                    for f in uploads:
-                        try:
-                            client.upload_fileobj(f, bucket, path_prefix + f.name)
-                            st.success(f"Uploaded `{path_prefix + f.name}`")
-                        except ClientError as exc:
-                            st.error(f"Upload of {f.name} failed: {aws_error(exc)}")
-                    st.cache_data.clear()
-            with folder_col:
-                new_folder = st.text_input("New folder name")
-                if new_folder and st.button("Create folder"):
-                    folder_key = path_prefix + new_folder.strip().strip("/") + "/"
-                    try:
-                        client.put_object(Bucket=bucket, Key=folder_key)
-                        st.success(f"Created `{folder_key}`")
-                        st.cache_data.clear()
-                    except ClientError as exc:
-                        st.error(f"Create folder failed: {aws_error(exc)}")
-
-    st.divider()
-
-    # Listing
-    hdr = st.columns([5, 2, 2, 1])
-    hdr[0].markdown("**Name**")
-    hdr[1].markdown("**Size**")
-    hdr[2].markdown("**Modified**")
-    hdr[3].markdown("**Actions**")
-
-    if not folders and not files:
-        st.info("No objects found here.")
-
-    for row in folders:
-        cols = st.columns([5, 2, 2, 1])
-        if cols[0].button(f"📁 {row['name']}", key=f"nav_{row['prefix']}"):
-            go_to(row["prefix"])
-        cols[1].markdown("—")
-        cols[2].markdown("—")
-
-    for row in files:
-        cols = st.columns([5, 2, 2, 1])
-        cols[0].markdown(f"📄 `{row['name']}`")
-        cols[1].markdown(format_bytes(row["size"]))
-        cols[2].markdown(format_dt(row["modified"]))
-        with cols[3], st.popover("⋯", use_container_width=True):
-            st.caption(f"`{row['key']}`")
-
-            if st.button("🔗 Presigned URL", key=f"url_{row['key']}"):
-                url = client.generate_presigned_url(
-                    "get_object",
-                    Params={"Bucket": bucket, "Key": row["key"]},
-                    ExpiresIn=int(st.session_state.presign_expiry),
-                )
-                st.code(url, language=None)  # st.code has a built-in copy button
-                st.caption(f"Expires in {st.session_state.presign_expiry}s — copy with the button above.")
-
-            if st.button("👁 Preview", key=f"prev_{row['key']}"):
-                st.session_state.preview_key = row["key"]
-                st.rerun()
-
-            if st.button("⬇ Prepare download", key=f"dl_{row['key']}"):
-                try:
-                    body = client.get_object(Bucket=bucket, Key=row["key"])["Body"].read()
-                    st.download_button(
-                        "💾 Save file", body, file_name=row["name"], key=f"save_{row['key']}"
-                    )
-                except ClientError as exc:
-                    st.error(aws_error(exc))
-
-            if can_write:
-                st.divider()
-                new_name = st.text_input(
-                    "Rename / move to key", value=row["key"], key=f"mv_{row['key']}"
-                )
-                if st.button("Move", key=f"mvbtn_{row['key']}") and new_name and new_name != row["key"]:
-                    try:
-                        client.copy_object(
-                            Bucket=bucket,
-                            Key=new_name,
-                            CopySource={"Bucket": bucket, "Key": row["key"]},
-                        )
-                        client.delete_object(Bucket=bucket, Key=row["key"])
-                        st.success(f"Moved to `{new_name}`")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except ClientError as exc:
-                        st.error(aws_error(exc))
-
-                confirm = st.checkbox("Confirm delete", key=f"cdel_{row['key']}")
-                if st.button("🗑 Delete", key=f"del_{row['key']}", disabled=not confirm):
-                    try:
-                        client.delete_object(Bucket=bucket, Key=row["key"])
-                        st.success(f"Deleted `{row['key']}`")
-                        st.cache_data.clear()
-                        st.rerun()
-                    except ClientError as exc:
-                        st.error(aws_error(exc))
-
-    # Preview panel
-    if st.session_state.preview_key:
-        key = st.session_state.preview_key
-        st.divider()
-        head_cols = st.columns([8, 1])
-        head_cols[0].markdown(f"#### 👁 Preview — `{key}`")
-        if head_cols[1].button("✕ Close"):
-            st.session_state.preview_key = None
-            st.rerun()
+        resp = None
         try:
-            obj = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{PREVIEW_MAX_BYTES - 1}")
-            data = obj["Body"].read()
-            if looks_like_text(data):
-                truncated = len(data) >= PREVIEW_MAX_BYTES
-                st.code(data.decode("utf-8", errors="replace"), language=None)
-                if truncated:
-                    st.caption(f"Showing first {PREVIEW_MAX_BYTES // 1000} KB only.")
-            else:
-                st.warning("This file does not look like ASCII/UTF-8 text — no preview available.")
+            resp = list_page(bucket, server_prefix, int(st.session_state.page_size), st.session_state.token)
         except ClientError as exc:
-            st.error(f"Preview failed: {aws_error(exc)}")
+            st.error(f"S3 error: {aws_error(exc)}")
+        except Exception as exc:
+            st.error(f"Could not list bucket: {exc}")
 
-    st.divider()
-    st.caption(
-        f"Page size {st.session_state.page_size} · "
-        f"{len(folders)} folders + {len(files)} files on this page"
-        + (" · more pages available" if next_token else "")
-    )
+        if resp is not None:
+            next_token = resp.get("NextContinuationToken")
+            has_prev = bool(st.session_state.token_stack)
+            with pcol:
+                b1, b2 = st.columns(2)
+                if b1.button("◀ Prev", disabled=not has_prev, use_container_width=True):
+                    st.session_state.token = st.session_state.token_stack.pop()
+                    st.rerun()
+                if b2.button("Next ▶", disabled=not next_token, use_container_width=True):
+                    st.session_state.token_stack.append(st.session_state.token)
+                    st.session_state.token = next_token
+                    st.rerun()
+
+            # Parse rows
+            folders = []
+            for cp in resp.get("CommonPrefixes", []):
+                full = cp["Prefix"]
+                folders.append({"name": full[len(path_prefix):], "prefix": full})
+
+            files = []
+            for obj in resp.get("Contents", []):
+                key = obj["Key"]
+                if key.endswith("/") and obj["Size"] == 0:
+                    continue  # folder marker
+                name = key[len(path_prefix):]
+                if filter_mode == "contains" and filter_text and filter_text.lower() not in name.lower():
+                    continue
+                files.append(
+                    {
+                        "name": name,
+                        "key": key,
+                        "size": obj["Size"],
+                        "modified": obj["LastModified"].replace(tzinfo=None),
+                    }
+                )
+
+            # Write-role toolbar
+            if can_write:
+                with st.expander("✏️ Write actions (upload / new folder)"):
+                    up_col, folder_col = st.columns(2)
+                    with up_col:
+                        uploads = st.file_uploader("Upload files here", accept_multiple_files=True)
+                        if uploads and st.button("Upload", type="primary"):
+                            for f in uploads:
+                                try:
+                                    client.upload_fileobj(f, bucket, path_prefix + f.name)
+                                    st.success(f"Uploaded `{path_prefix + f.name}`")
+                                except ClientError as exc:
+                                    st.error(f"Upload of {f.name} failed: {aws_error(exc)}")
+                            st.cache_data.clear()
+                    with folder_col:
+                        new_folder = st.text_input("New folder name")
+                        if new_folder and st.button("Create folder"):
+                            folder_key = path_prefix + new_folder.strip().strip("/") + "/"
+                            try:
+                                client.put_object(Bucket=bucket, Key=folder_key)
+                                st.success(f"Created `{folder_key}`")
+                                st.cache_data.clear()
+                            except ClientError as exc:
+                                st.error(f"Create folder failed: {aws_error(exc)}")
+
+            st.divider()
+
+            # Listing
+            hdr = st.columns([5, 2, 2, 1])
+            hdr[0].markdown("**Name**")
+            hdr[1].markdown("**Size**")
+            hdr[2].markdown("**Modified**")
+            hdr[3].markdown("**Actions**")
+
+            if not folders and not files:
+                st.info("No objects found here.")
+
+            for row in folders:
+                cols = st.columns([5, 2, 2, 1])
+                if cols[0].button(f"📁 {row['name']}", key=f"nav_{row['prefix']}"):
+                    go_to(row["prefix"])
+                cols[1].markdown("—")
+                cols[2].markdown("—")
+
+            for row in files:
+                cols = st.columns([5, 2, 2, 1])
+                cols[0].markdown(f"📄 `{row['name']}`")
+                cols[1].markdown(format_bytes(row["size"]))
+                cols[2].markdown(format_dt(row["modified"]))
+                with cols[3], st.popover("⋯", use_container_width=True):
+                    st.caption(f"`{row['key']}`")
+
+                    if st.button("🔗 Presigned URL", key=f"url_{row['key']}"):
+                        url = client.generate_presigned_url(
+                            "get_object",
+                            Params={"Bucket": bucket, "Key": row["key"]},
+                            ExpiresIn=int(st.session_state.presign_expiry),
+                        )
+                        st.code(url, language=None)  # st.code has a built-in copy button
+                        st.caption(f"Expires in {st.session_state.presign_expiry}s — copy with the button above.")
+
+                    if st.button("👁 Preview", key=f"prev_{row['key']}"):
+                        st.session_state.preview_key = row["key"]
+                        st.rerun()
+
+                    try:
+                        dl_params = {"Bucket": bucket, "Key": row["key"]}
+                        if not st.session_state.anonymous:
+                            # S3 rejects response-* params on unsigned (anonymous) requests
+                            dl_params["ResponseContentDisposition"] = (
+                                f'attachment; filename="{row["name"]}"'
+                            )
+                        dl_url = client.generate_presigned_url(
+                            "get_object",
+                            Params=dl_params,
+                            ExpiresIn=int(st.session_state.presign_expiry),
+                        )
+                        st.link_button("⬇ Download", dl_url, use_container_width=True)
+                    except Exception as exc:
+                        st.error(f"Download link failed: {exc}")
+
+                    if can_write:
+                        st.divider()
+                        new_name = st.text_input(
+                            "Rename / move to key", value=row["key"], key=f"mv_{row['key']}"
+                        )
+                        if st.button("Move", key=f"mvbtn_{row['key']}") and new_name and new_name != row["key"]:
+                            try:
+                                client.copy_object(
+                                    Bucket=bucket,
+                                    Key=new_name,
+                                    CopySource={"Bucket": bucket, "Key": row["key"]},
+                                )
+                                client.delete_object(Bucket=bucket, Key=row["key"])
+                                st.success(f"Moved to `{new_name}`")
+                                st.cache_data.clear()
+                                st.rerun()
+                            except ClientError as exc:
+                                st.error(aws_error(exc))
+
+                        confirm = st.checkbox("Confirm delete", key=f"cdel_{row['key']}")
+                        if st.button("🗑 Delete", key=f"del_{row['key']}", disabled=not confirm):
+                            try:
+                                client.delete_object(Bucket=bucket, Key=row["key"])
+                                st.success(f"Deleted `{row['key']}`")
+                                st.cache_data.clear()
+                                st.rerun()
+                            except ClientError as exc:
+                                st.error(aws_error(exc))
+
+            # Preview panel
+            if st.session_state.preview_key:
+                key = st.session_state.preview_key
+                st.divider()
+                head_cols = st.columns([8, 1])
+                head_cols[0].markdown(f"#### 👁 Preview — `{key}`")
+                if head_cols[1].button("✕ Close"):
+                    st.session_state.preview_key = None
+                    st.rerun()
+                try:
+                    obj = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{PREVIEW_MAX_BYTES - 1}")
+                    data = obj["Body"].read()
+                    if looks_like_text(data):
+                        truncated = len(data) >= PREVIEW_MAX_BYTES
+                        st.code(data.decode("utf-8", errors="replace"), language=None)
+                        if truncated:
+                            st.caption(f"Showing first {PREVIEW_MAX_BYTES // 1000} KB only.")
+                    else:
+                        st.warning("This file does not look like ASCII/UTF-8 text — no preview available.")
+                except ClientError as exc:
+                    st.error(f"Preview failed: {aws_error(exc)}")
+
+            st.divider()
+            st.caption(
+                f"Page size {st.session_state.page_size} · "
+                f"{len(folders)} folders + {len(files)} files on this page"
+                + (" · more pages available" if next_token else "")
+            )
 
 
 # ══════════════════════════════════════════════════════════════

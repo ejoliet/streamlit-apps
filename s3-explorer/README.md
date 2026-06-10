@@ -35,6 +35,26 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
+## Admin
+
+CLI — auth.py now runnable directly:
+
+### list users
+python auth.py list
+
+### change password (prompts if omitted)
+python auth.py passwd admin
+python auth.py passwd admin newpassword
+
+### add user
+python auth.py add alice --role write
+
+### change role
+python auth.py role roman write
+
+### delete user
+python auth.py delete roman
+
 ## Users
 
 On first run a `users.yaml` is created next to `app.py` (git-ignored,

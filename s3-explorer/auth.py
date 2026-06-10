@@ -114,3 +114,77 @@ def delete_user(username: str) -> None:
 
 def _admin_count(users: dict) -> int:
     return sum(1 for u in users.values() if u["role"] == "admin")
+
+
+if __name__ == "__main__":
+    import argparse
+    import getpass
+    import sys
+
+    parser = argparse.ArgumentParser(description="Manage S3 Explorer users")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_list = sub.add_parser("list", help="List all users")
+
+    p_passwd = sub.add_parser("passwd", help="Set a user's password")
+    p_passwd.add_argument("username")
+    p_passwd.add_argument("password", nargs="?", help="New password (prompted if omitted)")
+
+    p_add = sub.add_parser("add", help="Add a new user")
+    p_add.add_argument("username")
+    p_add.add_argument("--role", choices=ROLES, default="read-only")
+    p_add.add_argument("password", nargs="?", help="Password (prompted if omitted)")
+
+    p_role = sub.add_parser("role", help="Change a user's role")
+    p_role.add_argument("username")
+    p_role.add_argument("role", choices=ROLES)
+
+    p_del = sub.add_parser("delete", help="Delete a user")
+    p_del.add_argument("username")
+
+    args = parser.parse_args()
+
+    if args.cmd == "list":
+        users = load_users()
+        if not users:
+            print("No users found.")
+        else:
+            fmt = "{:<20} {}"
+            print(fmt.format("USERNAME", "ROLE"))
+            print("-" * 30)
+            for name, rec in sorted(users.items()):
+                print(fmt.format(name, rec["role"]))
+
+    elif args.cmd == "passwd":
+        pw = args.password or getpass.getpass(f"New password for {args.username}: ")
+        try:
+            set_password(args.username, pw)
+            print(f"Password updated for '{args.username}'.")
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.cmd == "add":
+        pw = args.password or getpass.getpass(f"Password for {args.username}: ")
+        try:
+            add_user(args.username, pw, args.role)
+            print(f"Created user '{args.username}' with role '{args.role}'.")
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.cmd == "role":
+        try:
+            set_role(args.username, args.role)
+            print(f"Role for '{args.username}' set to '{args.role}'.")
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+    elif args.cmd == "delete":
+        try:
+            delete_user(args.username)
+            print(f"Deleted user '{args.username}'.")
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
