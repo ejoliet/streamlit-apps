@@ -5,11 +5,15 @@ AWS access uses the local credential chain (env vars, ~/.aws, instance/task
 role) so no AWS login is required. App users authenticate with a username +
 password (see auth.py); their role gates what they can do:
 
-  - read-only : browse, filter, preview ASCII files, presigned URLs, download
+  - read-only : browse, filter, preview text/data files, presigned URLs, download
   - write     : read-only + upload, delete, create folders, rename/move
-  - admin     : write + user management
+  - admin     : write + user management + Firefly URL config
 """
 
+import csv
+import io
+import json
+import os
 import string
 from datetime import datetime
 from typing import Optional
@@ -22,6 +26,12 @@ from botocore.exceptions import ClientError
 
 import auth
 
+try:
+    from firefly_connector import FireflyConnector
+    FIREFLY_AVAILABLE = True
+except ImportError:
+    FIREFLY_AVAILABLE = False
+
 st.set_page_config(
     page_title="S3 Explorer",
     page_icon="🗂️",
@@ -29,7 +39,87 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-PREVIEW_MAX_BYTES = 100_000  # read at most this much for ASCII preview
+PREVIEW_MAX_BYTES = 100_000
+FIREFLY_DEFAULT_URL = "https://irsa.ipac.caltech.edu/irsaviewer"
+
+# Extension → syntax-highlight language (None = plain text, no highlighting)
+PREVIEW_LANGUAGES: dict[str, str | None] = {
+    # plain text
+    ".txt": None, ".log": None, ".out": None, ".err": None,
+    # markup / docs
+    ".md": "markdown", ".markdown": "markdown",
+    ".rst": None, ".tex": "latex",
+    # data serialisation
+    ".json": "json", ".jsonl": "json", ".geojson": "json", ".ndjson": "json",
+    ".yaml": "yaml", ".yml": "yaml",
+    ".toml": "toml",
+    ".xml": "xml", ".svg": "xml", ".rss": "xml", ".atom": "xml",
+    # config / properties
+    ".ini": "ini", ".cfg": "ini", ".conf": "ini",
+    ".properties": "properties",
+    ".env": "bash", ".envrc": "bash",
+    # tabular (handled separately as dataframe)
+    ".csv": "csv", ".tsv": "tsv",
+    # IPAC / astronomy table formats (plain text)
+    ".tbl": None, ".ipac": None, ".vot": "xml", ".fits": None,
+    # web
+    ".html": "html", ".htm": "html",
+    ".css": "css", ".scss": "css", ".less": "css",
+    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
+    ".ts": "typescript", ".tsx": "typescript",
+    # scripting / programming
+    ".py": "python", ".pyi": "python", ".pyw": "python",
+    ".sh": "bash", ".bash": "bash", ".zsh": "bash", ".fish": "bash", ".ksh": "bash",
+    ".sql": "sql",
+    ".r": "r", ".R": "r",
+    ".lua": "lua",
+    ".rb": "ruby",
+    ".java": "java",
+    ".c": "c", ".h": "c",
+    ".cpp": "cpp", ".cxx": "cpp", ".cc": "cpp", ".hpp": "cpp",
+    ".go": "go",
+    ".rs": "rust",
+    ".php": "php",
+    ".swift": "swift",
+    ".kt": "kotlin", ".kts": "kotlin",
+    ".cs": "csharp",
+    ".scala": "scala",
+    ".groovy": "groovy",
+    ".pl": "perl", ".pm": "perl",
+    ".m": "matlab",
+    # notebooks / data science
+    ".ipynb": "json",
+    # infra / ops
+    ".dockerfile": "dockerfile",
+    ".makefile": "makefile",
+    ".tf": "hcl", ".hcl": "hcl",
+    ".proto": "protobuf",
+    ".graphql": "graphql", ".gql": "graphql",
+}
+
+# Render as interactive dataframe instead of code block
+TABULAR_EXTS = {".csv", ".tsv"}
+
+# ──────────────────────────────────────────────────────────────
+# CSS tweaks
+# ──────────────────────────────────────────────────────────────
+st.markdown(
+    """
+    <style>
+    /* Fix popover width — prevent it growing with long file paths */
+    div[data-testid="stPopoverBody"] {
+        min-width: 220px !important;
+        max-width: 300px !important;
+    }
+    div[data-testid="stPopoverBody"] code {
+        word-break: break-all;
+        white-space: pre-wrap;
+        font-size: 0.78em;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -52,6 +142,8 @@ _ss("filter_text", "")
 _ss("filter_mode", "starts with")
 _ss("preview_key", None)
 _ss("anonymous", False)
+_ss("firefly_url", FIREFLY_DEFAULT_URL)
+_ss("firefly_result", None)  # {"key": str, "url": str} set after show_url succeeds
 
 
 def reset_pagination():
@@ -145,9 +237,77 @@ def looks_like_text(data: bytes) -> bool:
     return sum(c in printable or c.isprintable() for c in sample) / len(sample) > 0.95
 
 
+def detect_language(key: str) -> str | None:
+    """Return syntax-highlight language for a key path.
+
+    Returns None for known plain-text extensions, '__unknown__' when the
+    extension is not in the map at all (caller decides whether to try text).
+    """
+    ext = os.path.splitext(key)[1].lower()
+    basename = os.path.basename(key).lower()
+    if not ext:
+        if basename in ("dockerfile", "makefile", "rakefile", "gemfile", "vagrantfile"):
+            return basename
+        return "__unknown__"
+    if ext in PREVIEW_LANGUAGES:
+        return PREVIEW_LANGUAGES[ext]  # may be None (plain text) or a language string
+    return "__unknown__"
+
+
 def aws_error(exc: ClientError) -> str:
     err = exc.response.get("Error", {})
     return f"[{err.get('Code', '?')}] {err.get('Message', exc)}"
+
+
+def render_preview(client, bucket: str, key: str):
+    """Render a file preview: dataframe for CSV/TSV, pretty JSON, or syntax-highlighted text."""
+    ext = os.path.splitext(key)[1].lower()
+    try:
+        obj = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{PREVIEW_MAX_BYTES - 1}")
+        data = obj["Body"].read()
+    except ClientError as exc:
+        st.error(f"Preview failed: {aws_error(exc)}")
+        return
+
+    truncated = len(data) >= PREVIEW_MAX_BYTES
+    footer = f"First {PREVIEW_MAX_BYTES // 1000} KB — file may be larger." if truncated else ""
+
+    # ── CSV / TSV → interactive dataframe ──────────────────────
+    if ext in TABULAR_EXTS:
+        try:
+            sep = "\t" if ext == ".tsv" else ","
+            text = data.decode("utf-8", errors="replace")
+            rows = list(csv.DictReader(io.StringIO(text), delimiter=sep))
+            if rows:
+                st.dataframe(rows, use_container_width=True)
+                if footer:
+                    st.caption(footer)
+                return
+        except Exception:
+            pass  # fall through to text
+
+    # ── JSON / IPYNB → pretty-printed ─────────────────────────
+    if ext in (".json", ".geojson", ".ipynb"):
+        try:
+            parsed = json.loads(data.decode("utf-8", errors="replace"))
+            st.code(json.dumps(parsed, indent=2), language="json")
+            if footer:
+                st.caption(footer)
+            return
+        except json.JSONDecodeError:
+            pass  # fall through
+
+    # ── Generic text with syntax highlighting ─────────────────
+    if looks_like_text(data):
+        text = data.decode("utf-8", errors="replace")
+        lang = detect_language(key)
+        if lang == "__unknown__":
+            lang = None
+        st.code(text, language=lang or "text")
+        if footer:
+            st.caption(footer)
+    else:
+        st.warning("Binary file — no text preview available.")
 
 
 # ──────────────────────────────────────────────────────────────
@@ -202,6 +362,14 @@ with st.sidebar:
         value=st.session_state.presign_expiry,
         step=300,
     )
+    if role == "admin":
+        new_ff = st.text_input(
+            "Firefly URL",
+            value=st.session_state.firefly_url,
+            help="Caltech/IPAC Firefly viewer base URL. Admin-only.",
+        )
+        if new_ff.strip() != st.session_state.firefly_url:
+            st.session_state.firefly_url = new_ff.strip() or FIREFLY_DEFAULT_URL
 
 
 # ──────────────────────────────────────────────────────────────
@@ -235,7 +403,7 @@ with tabs[0]:
             if crumb_cols[i].button(label, key=f"crumb_{i}"):
                 go_to(prefix)
 
-        # Filter + pagination controls
+        # Filter + top pagination controls
         fcol, mcol, pcol = st.columns([5, 2, 2])
         with fcol:
             filter_text = st.text_input(
@@ -272,17 +440,18 @@ with tabs[0]:
         if resp is not None:
             next_token = resp.get("NextContinuationToken")
             has_prev = bool(st.session_state.token_stack)
+
             with pcol:
                 b1, b2 = st.columns(2)
-                if b1.button("◀ Prev", disabled=not has_prev, use_container_width=True):
+                if b1.button("◀", disabled=not has_prev, use_container_width=True, help="Previous page"):
                     st.session_state.token = st.session_state.token_stack.pop()
                     st.rerun()
-                if b2.button("Next ▶", disabled=not next_token, use_container_width=True):
+                if b2.button("▶", disabled=not next_token, use_container_width=True, help="Next page"):
                     st.session_state.token_stack.append(st.session_state.token)
                     st.session_state.token = next_token
                     st.rerun()
 
-            # Parse rows
+            # Parse folders and files
             folders = []
             for cp in resp.get("CommonPrefixes", []):
                 full = cp["Prefix"]
@@ -292,7 +461,7 @@ with tabs[0]:
             for obj in resp.get("Contents", []):
                 key = obj["Key"]
                 if key.endswith("/") and obj["Size"] == 0:
-                    continue  # folder marker
+                    continue
                 name = key[len(path_prefix):]
                 if filter_mode == "contains" and filter_text and filter_text.lower() not in name.lower():
                     continue
@@ -332,117 +501,184 @@ with tabs[0]:
 
             st.divider()
 
-            # Listing
-            hdr = st.columns([5, 2, 2, 1])
-            hdr[0].markdown("**Name**")
-            hdr[1].markdown("**Size**")
-            hdr[2].markdown("**Modified**")
-            hdr[3].markdown("**Actions**")
+            # ── Two-panel layout: file list | preview ──────────────
+            list_col, preview_col = st.columns([6, 4])
 
-            if not folders and not files:
-                st.info("No objects found here.")
+            with list_col:
+                # Column headers
+                hdr = st.columns([5, 2, 2, 1])
+                hdr[0].markdown("**Name**")
+                hdr[1].markdown("**Size**")
+                hdr[2].markdown("**Modified**")
+                hdr[3].markdown("**⋯**")
 
-            for row in folders:
-                cols = st.columns([5, 2, 2, 1])
-                if cols[0].button(f"📁 {row['name']}", key=f"nav_{row['prefix']}"):
-                    go_to(row["prefix"])
-                cols[1].markdown("—")
-                cols[2].markdown("—")
+                if not folders and not files:
+                    st.info("No objects found here.")
 
-            for row in files:
-                cols = st.columns([5, 2, 2, 1])
-                cols[0].markdown(f"📄 `{row['name']}`")
-                cols[1].markdown(format_bytes(row["size"]))
-                cols[2].markdown(format_dt(row["modified"]))
-                with cols[3], st.popover("⋯", use_container_width=True):
-                    st.caption(f"`{row['key']}`")
+                for row in folders:
+                    cols = st.columns([5, 2, 2, 1])
+                    if cols[0].button(f"📁 {row['name']}", key=f"nav_{row['prefix']}"):
+                        go_to(row["prefix"])
+                    cols[1].markdown("—")
+                    cols[2].markdown("—")
 
-                    if st.button("🔗 Presigned URL", key=f"url_{row['key']}"):
-                        url = client.generate_presigned_url(
-                            "get_object",
-                            Params={"Bucket": bucket, "Key": row["key"]},
-                            ExpiresIn=int(st.session_state.presign_expiry),
+                for row in files:
+                    name_display = row["name"] if len(row["name"]) <= 45 else row["name"][:42] + "…"
+                    cols = st.columns([5, 2, 2, 1])
+                    cols[0].markdown(f"📄 `{name_display}`")
+                    cols[1].markdown(format_bytes(row["size"]))
+                    cols[2].markdown(format_dt(row["modified"]))
+
+                    with cols[3], st.popover("⋯", use_container_width=True):
+                        key_display = (
+                            row["key"] if len(row["key"]) <= 55 else "…" + row["key"][-52:]
                         )
-                        st.code(url, language=None)  # st.code has a built-in copy button
-                        st.caption(f"Expires in {st.session_state.presign_expiry}s — copy with the button above.")
+                        st.caption(f"`{key_display}`")
 
-                    if st.button("👁 Preview", key=f"prev_{row['key']}"):
-                        st.session_state.preview_key = row["key"]
-                        st.rerun()
+                        # Preview
+                        if st.button("👁 Preview", key=f"prev_{row['key']}"):
+                            st.session_state.preview_key = row["key"]
+                            st.rerun()
 
-                    try:
-                        dl_params = {"Bucket": bucket, "Key": row["key"]}
-                        if not st.session_state.anonymous:
-                            # S3 rejects response-* params on unsigned (anonymous) requests
-                            dl_params["ResponseContentDisposition"] = (
-                                f'attachment; filename="{row["name"]}"'
+                        # Presigned URL
+                        if st.button("🔗 Presigned URL", key=f"url_{row['key']}"):
+                            url = client.generate_presigned_url(
+                                "get_object",
+                                Params={"Bucket": bucket, "Key": row["key"]},
+                                ExpiresIn=int(st.session_state.presign_expiry),
                             )
-                        dl_url = client.generate_presigned_url(
-                            "get_object",
-                            Params=dl_params,
-                            ExpiresIn=int(st.session_state.presign_expiry),
-                        )
-                        st.link_button("⬇ Download", dl_url, use_container_width=True)
-                    except Exception as exc:
-                        st.error(f"Download link failed: {exc}")
+                            st.code(url, language=None)
+                            st.caption(f"Expires in {st.session_state.presign_expiry}s")
 
-                    if can_write:
-                        st.divider()
-                        new_name = st.text_input(
-                            "Rename / move to key", value=row["key"], key=f"mv_{row['key']}"
-                        )
-                        if st.button("Move", key=f"mvbtn_{row['key']}") and new_name and new_name != row["key"]:
-                            try:
-                                client.copy_object(
-                                    Bucket=bucket,
-                                    Key=new_name,
-                                    CopySource={"Bucket": bucket, "Key": row["key"]},
+                        # Download
+                        try:
+                            dl_params = {"Bucket": bucket, "Key": row["key"]}
+                            if not st.session_state.anonymous:
+                                dl_params["ResponseContentDisposition"] = (
+                                    f'attachment; filename="{row["name"]}"'
                                 )
-                                client.delete_object(Bucket=bucket, Key=row["key"])
-                                st.success(f"Moved to `{new_name}`")
-                                st.cache_data.clear()
-                                st.rerun()
-                            except ClientError as exc:
-                                st.error(aws_error(exc))
+                            dl_url = client.generate_presigned_url(
+                                "get_object",
+                                Params=dl_params,
+                                ExpiresIn=int(st.session_state.presign_expiry),
+                            )
+                            st.link_button("⬇ Download", dl_url, use_container_width=True)
+                        except Exception as exc:
+                            st.error(f"Download link failed: {exc}")
 
-                        confirm = st.checkbox("Confirm delete", key=f"cdel_{row['key']}")
-                        if st.button("🗑 Delete", key=f"del_{row['key']}", disabled=not confirm):
-                            try:
-                                client.delete_object(Bucket=bucket, Key=row["key"])
-                                st.success(f"Deleted `{row['key']}`")
-                                st.cache_data.clear()
-                                st.rerun()
-                            except ClientError as exc:
-                                st.error(aws_error(exc))
+                        # Firefly
+                        if FIREFLY_AVAILABLE:
+                            if st.button("🔭 Send to Firefly", key=f"ff_{row['key']}", use_container_width=True):
+                                try:
+                                    if st.session_state.anonymous:
+                                        ff_data_url = f"https://{bucket}.s3.amazonaws.com/{row['key']}"
+                                    else:
+                                        ff_data_url = client.generate_presigned_url(
+                                            "get_object",
+                                            Params={"Bucket": bucket, "Key": row["key"]},
+                                            ExpiresIn=int(st.session_state.presign_expiry),
+                                        )
+                                    connector = FireflyConnector(st.session_state.firefly_url)
+                                    browser_url = connector.show_url(
+                                        ff_data_url, title=row["name"]
+                                    )
+                                    st.session_state.firefly_result = {
+                                        "key": row["key"],
+                                        "name": row["name"],
+                                        "url": browser_url,
+                                    }
+                                    st.rerun()
+                                except Exception as exc:
+                                    st.error(f"Firefly error: {exc}")
+                        else:
+                            st.caption("🔭 Install `firefly_client` for Firefly integration.")
 
-            # Preview panel
-            if st.session_state.preview_key:
-                key = st.session_state.preview_key
+                        # Write actions
+                        if can_write:
+                            st.divider()
+                            new_name = st.text_input(
+                                "Rename / move to key", value=row["key"], key=f"mv_{row['key']}"
+                            )
+                            if (
+                                st.button("Move", key=f"mvbtn_{row['key']}")
+                                and new_name
+                                and new_name != row["key"]
+                            ):
+                                try:
+                                    client.copy_object(
+                                        Bucket=bucket,
+                                        Key=new_name,
+                                        CopySource={"Bucket": bucket, "Key": row["key"]},
+                                    )
+                                    client.delete_object(Bucket=bucket, Key=row["key"])
+                                    st.success(f"Moved to `{new_name}`")
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                except ClientError as exc:
+                                    st.error(aws_error(exc))
+
+                            confirm = st.checkbox("Confirm delete", key=f"cdel_{row['key']}")
+                            if st.button(
+                                "🗑 Delete", key=f"del_{row['key']}", disabled=not confirm
+                            ):
+                                try:
+                                    client.delete_object(Bucket=bucket, Key=row["key"])
+                                    st.success(f"Deleted `{row['key']}`")
+                                    st.cache_data.clear()
+                                    st.rerun()
+                                except ClientError as exc:
+                                    st.error(aws_error(exc))
+
+                # Footer pagination
                 st.divider()
-                head_cols = st.columns([8, 1])
-                head_cols[0].markdown(f"#### 👁 Preview — `{key}`")
-                if head_cols[1].button("✕ Close"):
-                    st.session_state.preview_key = None
+                fc1, fc2, fc3 = st.columns([2, 6, 2])
+                if fc1.button(
+                    "◀ Prev", disabled=not has_prev, use_container_width=True, key="prev_foot"
+                ):
+                    st.session_state.token = st.session_state.token_stack.pop()
                     st.rerun()
-                try:
-                    obj = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{PREVIEW_MAX_BYTES - 1}")
-                    data = obj["Body"].read()
-                    if looks_like_text(data):
-                        truncated = len(data) >= PREVIEW_MAX_BYTES
-                        st.code(data.decode("utf-8", errors="replace"), language=None)
-                        if truncated:
-                            st.caption(f"Showing first {PREVIEW_MAX_BYTES // 1000} KB only.")
-                    else:
-                        st.warning("This file does not look like ASCII/UTF-8 text — no preview available.")
-                except ClientError as exc:
-                    st.error(f"Preview failed: {aws_error(exc)}")
+                fc2.caption(
+                    f"Page size {st.session_state.page_size} · "
+                    f"{len(folders)} folders + {len(files)} files on this page"
+                    + (" · more pages available" if next_token else "")
+                )
+                if fc3.button(
+                    "Next ▶", disabled=not next_token, use_container_width=True, key="next_foot"
+                ):
+                    st.session_state.token_stack.append(st.session_state.token)
+                    st.session_state.token = next_token
+                    st.rerun()
 
-            st.divider()
-            st.caption(
-                f"Page size {st.session_state.page_size} · "
-                f"{len(folders)} folders + {len(files)} files on this page"
-                + (" · more pages available" if next_token else "")
-            )
+            # ── Right-side preview panel ───────────────────────────
+            with preview_col:
+                # Firefly result banner (shown until dismissed)
+                if st.session_state.firefly_result:
+                    res = st.session_state.firefly_result
+                    st.success(f"**🔭 Firefly ready** — `{res['name']}`")
+                    st.link_button(
+                        "Open Firefly viewer →", res["url"], use_container_width=True
+                    )
+                    if st.button("Dismiss", key="dismiss_ff"):
+                        st.session_state.firefly_result = None
+                        st.rerun()
+                    st.divider()
+
+                if st.session_state.preview_key:
+                    key = st.session_state.preview_key
+                    fname = key.split("/")[-1]
+                    hc1, hc2 = st.columns([8, 1])
+                    hc1.markdown(f"**👁 {fname}**")
+                    if hc2.button("✕", key="close_preview", help="Close preview"):
+                        st.session_state.preview_key = None
+                        st.rerun()
+                    st.caption(f"`{key}`")
+                    render_preview(client, bucket, key)
+                else:
+                    st.info(
+                        "👁 **File preview**\n\n"
+                        "Select a file from the list and click **Preview** "
+                        "to view its contents here."
+                    )
 
 
 # ══════════════════════════════════════════════════════════════
@@ -457,8 +693,11 @@ if role == "admin":
             cols = st.columns([3, 2, 3, 2, 2])
             cols[0].markdown(f"**{name}**" + (" (you)" if name == st.session_state.user else ""))
             new_role = cols[1].selectbox(
-                "Role", auth.ROLES, index=auth.ROLES.index(record["role"]),
-                key=f"role_{name}", label_visibility="collapsed",
+                "Role",
+                auth.ROLES,
+                index=auth.ROLES.index(record["role"]),
+                key=f"role_{name}",
+                label_visibility="collapsed",
             )
             if new_role != record["role"]:
                 try:
@@ -467,13 +706,18 @@ if role == "admin":
                 except ValueError as exc:
                     st.error(str(exc))
             new_pw = cols[2].text_input(
-                "New password", key=f"pw_{name}", type="password",
-                placeholder="new password", label_visibility="collapsed",
+                "New password",
+                key=f"pw_{name}",
+                type="password",
+                placeholder="new password",
+                label_visibility="collapsed",
             )
             if cols[3].button("Set password", key=f"setpw_{name}", disabled=not new_pw):
                 auth.set_password(name, new_pw)
                 st.success(f"Password updated for {name}")
-            if cols[4].button("Delete", key=f"deluser_{name}", disabled=name == st.session_state.user):
+            if cols[4].button(
+                "Delete", key=f"deluser_{name}", disabled=name == st.session_state.user
+            ):
                 try:
                     auth.delete_user(name)
                     st.rerun()
