@@ -1,0 +1,390 @@
+# Instincts generated from https://github.com/ejoliet/streamlit-apps
+# Generated: 2026-06-12T23:25:48.538Z
+# Version: 2.0
+# NOTE: This file supplements (does not replace) any existing curated instincts.
+# High-confidence manually curated instincts should be preserved alongside these.
+
+---
+id: streamlit-apps-commit-length
+trigger: "when writing a commit message"
+confidence: 0.6
+domain: git
+source: repo-analysis
+source_repo: https://github.com/ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Commit Length
+
+## Action
+
+Keep commit messages concise (~31 characters)
+
+## Evidence
+
+- Average commit message length: 31 chars
+- Based on 8 commits
+
+---
+id: streamlit-apps-naming-files
+trigger: "when creating a new file"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Naming Files
+
+## Action
+
+Use PascalCase naming convention
+
+## Evidence
+
+- Analyzed file naming patterns in repository
+- Dominant pattern: PascalCase
+
+---
+id: streamlit-apps-import-relative
+trigger: "when importing modules"
+confidence: 0.75
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Import Relative
+
+## Action
+
+Use relative imports for project files
+
+## Evidence
+
+- Import analysis shows relative import pattern
+- Example: import { x } from '../lib/x'
+
+---
+id: streamlit-apps-export-style
+trigger: "when exporting from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: https://github.com/ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Export Style
+
+## Action
+
+Prefer named exports
+
+## Evidence
+
+- Export pattern analysis
+- Dominant style: named
+
+---
+id: streamlit-apps-test-separate
+trigger: "when writing tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: https://github.com/ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Test Separate
+
+## Action
+
+Place tests in the tests/ or __tests__/ directory, mirroring src structure
+
+## Evidence
+
+- Separate test directory pattern detected
+- Tests live in dedicated test folders
+
+---
+id: streamlit-apps-workflow-feature-implementation-update
+trigger: "when doing feature implementation update"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Workflow Feature Implementation Update
+
+## Action
+
+Follow the feature-implementation-update workflow:
+1. Edit or create main app logic file (e.g., app.py)
+2. Update or create supporting modules (e.g., auth.py, firefly_connector.py)
+3. Update requirements.txt if dependencies change
+4. Update README.md to document the feature
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: s3-explorer/app.py, s3-explorer/auth.py, s3-explorer/firefly_connector.py
+
+---
+id: streamlit-apps-workflow-dependency-or-dockerfile-update
+trigger: "when doing dependency or dockerfile update"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Workflow Dependency Or Dockerfile Update
+
+## Action
+
+Follow the dependency-or-dockerfile-update workflow:
+1. Edit requirements.txt to add or update dependencies
+2. Edit or add Dockerfile as needed
+3. Optionally update .env.example or related config files
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: s3-explorer/requirements.txt, s3-explorer/Dockerfile, gcn-voevent-monitor/.env.example
+
+---
+id: streamlit-apps-workflow-documentation-update
+trigger: "when doing documentation update"
+confidence: 0.6
+domain: workflow
+source: repo-analysis
+source_repo: https://github.com/ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Workflow Documentation Update
+
+## Action
+
+Follow the documentation-update workflow:
+1. Edit README.md or other documentation files (e.g., AGENTS.md, CLAUDE.md)
+
+## Evidence
+
+- Workflow detected from commit patterns
+- Frequency: ~2x per month
+- Files: s3-explorer/README.md, s3-explorer/AGENTS.md, s3-explorer/CLAUDE.md
+
+---
+id: streamlit-apps-instinct-file-naming
+trigger: "When creating a new file in the codebase"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Instinct File Naming
+
+## Action
+
+Name the file using PascalCase (e.g., FireflyConnector.py)
+
+## Evidence
+
+- Pattern in architecture: namingConventions.files = PascalCase
+
+---
+id: streamlit-apps-instinct-function-naming
+trigger: "When defining a new function"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Instinct Function Naming
+
+## Action
+
+Name the function using camelCase (e.g., getUserRoles)
+
+## Evidence
+
+- Pattern in architecture: namingConventions.functions = camelCase
+
+---
+id: streamlit-apps-instinct-class-naming
+trigger: "When defining a new class"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Instinct Class Naming
+
+## Action
+
+Name the class using PascalCase (e.g., S3Explorer)
+
+## Evidence
+
+- Pattern in architecture: namingConventions.classes = PascalCase
+
+---
+id: streamlit-apps-instinct-constant-naming
+trigger: "When defining a constant"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Instinct Constant Naming
+
+## Action
+
+Name the constant using SCREAMING_SNAKE_CASE (e.g., MAX_USERS)
+
+## Evidence
+
+- Pattern in architecture: namingConventions.constants = SCREAMING_SNAKE_CASE
+
+---
+id: streamlit-apps-instinct-import-style
+trigger: "When importing modules within the package"
+confidence: 0.8
+domain: code-style
+source: repo-analysis
+source_repo: ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Instinct Import Style
+
+## Action
+
+Use relative imports
+
+## Evidence
+
+- Pattern in architecture: importStyle = relative
+
+---
+id: streamlit-apps-instinct-export-style
+trigger: "When exporting functions or classes from a module"
+confidence: 0.7
+domain: code-style
+source: repo-analysis
+source_repo: ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Instinct Export Style
+
+## Action
+
+Use named exports
+
+## Evidence
+
+- Pattern in architecture: exportStyle = named
+
+---
+id: streamlit-apps-instinct-test-location
+trigger: "When adding or updating tests"
+confidence: 0.8
+domain: testing
+source: repo-analysis
+source_repo: ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Instinct Test Location
+
+## Action
+
+Place test files in a separate directory from source code
+
+## Evidence
+
+- Pattern in architecture: testLocation = separate
+
+---
+id: streamlit-apps-instinct-git-commit-format
+trigger: "When writing a commit message"
+confidence: 0.8
+domain: git
+source: repo-analysis
+source_repo: ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Instinct Git Commit Format
+
+## Action
+
+Use a short, freeform message without a strict prefix; keep average length around 31 characters
+
+## Evidence
+
+- Pattern in commits: freeform, averageLength: 31
+- Examples: 'add dockerfile', 'update README'
+
+---
+id: streamlit-apps-instinct-feature-implementation-update
+trigger: "When adding a new feature or improving an existing one in the app"
+confidence: 0.9
+domain: workflow
+source: repo-analysis
+source_repo: ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Instinct Feature Implementation Update
+
+## Action
+
+Edit or create main app logic file, update supporting modules, update requirements.txt if dependencies change, and update README.md to document the feature
+
+## Evidence
+
+- Workflow: feature-implementation-update
+- Seen in commit sequence and files involved
+
+---
+id: streamlit-apps-instinct-dependency-or-dockerfile-update
+trigger: "When adding a new dependency or updating the Dockerfile for deployment"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Instinct Dependency Or Dockerfile Update
+
+## Action
+
+Edit requirements.txt, edit or add Dockerfile as needed, and optionally update .env.example or related config files
+
+## Evidence
+
+- Workflow: dependency-or-dockerfile-update
+- Seen in commit sequence and files involved
+
+---
+id: streamlit-apps-instinct-documentation-update
+trigger: "When documenting a new feature or updating usage instructions"
+confidence: 0.85
+domain: workflow
+source: repo-analysis
+source_repo: ejoliet/streamlit-apps
+---
+
+# Streamlit Apps Instinct Documentation Update
+
+## Action
+
+Edit README.md or other documentation files (e.g., AGENTS.md, CLAUDE.md)
+
+## Evidence
+
+- Workflow: documentation-update
+- Seen in commit sequence and files involved
+
