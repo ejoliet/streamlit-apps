@@ -39,16 +39,19 @@ controls what they can do.
   - 👁 Preview in right-hand panel
   - 🔗 Presigned URL — one-click copy (configurable expiry)
   - ⬇ Download — direct browser download via presigned URL
-  - 🔭 Send to Firefly — push data to the Caltech/IPAC
-    [Firefly](https://github.com/Caltech-IPAC/firefly) viewer using
-    `firefly_client.show_data`; returns a browser URL to open the viewer
+  - 🔭 Send to Firefly — one click opens (or reuses) a single Caltech/IPAC
+    [Firefly](https://github.com/Caltech-IPAC/firefly) viewer tab and loads
+    the file there, showing its metadata first with a *Load* button
     (supports FITS, IPAC tables, CSV, VOTable, region files, etc.)
   - Rename / move, delete (write/admin only)
 
-- **Firefly integration** — uses `firefly_client.FireflyClient.make_client()`
-  to establish a WebSocket channel to the Firefly server, then calls
-  `show_data(url)` with a presigned (or public) S3 URL. The viewer URL is
-  displayed in the preview panel for one-click open. Default server:
+- **Firefly integration** — one `firefly_client` WebSocket channel per app
+  session (cached client, stable channel id). On each send the file's
+  presigned (or public) S3 URL goes out two ways: a `show_data` dispatch for
+  an already-open viewer tab, and a boot URL carrying the same action
+  (`?__action=app_data.externalUpload&url=…`) used only when the tab must be
+  (re)opened — so the first click works without a retry. A named browser
+  window keeps all sends in one tab. Default server:
   `https://irsa.ipac.caltech.edu/irsaviewer` — configurable by admins in
   the sidebar.
 

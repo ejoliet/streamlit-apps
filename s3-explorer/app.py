@@ -15,11 +15,13 @@ import io
 import json
 import os
 import string
+import uuid
 from datetime import datetime
 from typing import Optional
 
 import boto3
 import streamlit as st
+import streamlit.components.v1 as components
 from botocore import UNSIGNED
 from botocore.config import Config
 from botocore.exceptions import ClientError
@@ -143,7 +145,9 @@ _ss("filter_mode", "starts with")
 _ss("preview_key", None)
 _ss("anonymous", False)
 _ss("firefly_url", FIREFLY_DEFAULT_URL)
-_ss("firefly_result", None)  # {"key": str, "url": str} set after show_url succeeds
+# Stable channel for this browser session — Firefly pushes actions to whoever
+# is connected on this channel, so it must survive Streamlit reruns.
+_ss("firefly_channel", f"s3x-{uuid.uuid4().hex[:12]}")
 
 
 def reset_pagination():
@@ -191,6 +195,21 @@ def get_client(anonymous: bool):
     if anonymous:
         return boto3.client("s3", config=Config(signature_version=UNSIGNED))
     return boto3.client("s3", config=Config(signature_version="s3v4"))
+
+
+# validate: discard cached connectors built from an older FireflyConnector
+# class (st.cache_resource outlives code edits until the server restarts)
+@st.cache_resource(
+    show_spinner=False,
+    validate=lambda c: type(c).__name__ == "FireflyConnector" and hasattr(c, "boot_url"),
+)
+def get_firefly(server_url: str, channel: str) -> "FireflyConnector":
+    """One Firefly client per (server, channel) — survives Streamlit reruns.
+
+    A new client per click would dispatch onto a fresh channel nobody is
+    connected to, so the action would be lost and the viewer stays blank.
+    """
+    return FireflyConnector(server_url, channel)
 
 
 @st.cache_data(show_spinner=False, ttl=300)
@@ -566,7 +585,7 @@ with tabs[0]:
                         except Exception as exc:
                             st.error(f"Download link failed: {exc}")
 
-                        # Firefly
+                        # Firefly — dispatch presigned URL via show_data, open viewer tab
                         if FIREFLY_AVAILABLE:
                             if st.button("🔭 Send to Firefly", key=f"ff_{row['key']}", use_container_width=True):
                                 try:
@@ -578,20 +597,60 @@ with tabs[0]:
                                             Params={"Bucket": bucket, "Key": row["key"]},
                                             ExpiresIn=int(st.session_state.presign_expiry),
                                         )
-                                    connector = FireflyConnector(st.session_state.firefly_url)
-                                    browser_url = connector.show_url(
-                                        ff_data_url, title=row["name"]
+                                    connector = get_firefly(
+                                        st.session_state.firefly_url,
+                                        st.session_state.firefly_channel,
                                     )
-                                    st.session_state.firefly_result = {
-                                        "key": row["key"],
-                                        "name": row["name"],
-                                        "url": browser_url,
-                                    }
-                                    st.rerun()
+                                    # Two delivery paths, one click:
+                                    #  - tab already open → this websocket dispatch
+                                    #    loads the file in it
+                                    #  - tab missing → the boot URL below carries the
+                                    #    load action, so the file loads on first open
+                                    #    (a dispatch sent before the tab exists is lost)
+                                    connector.show_url(
+                                        ff_data_url, preview=True, title=row["name"]
+                                    )
+                                    boot_url = connector.boot_url(
+                                        ff_data_url, preview=True, title=row["name"]
+                                    )
+                                    tab_name = f"firefly_{st.session_state.firefly_channel}"
+                                    # Streamlit remounts this iframe on popover
+                                    # interactions, re-running the script — the nonce
+                                    # ensures the tab logic fires once per click.
+                                    nonce = uuid.uuid4().hex
+                                    components.html(
+                                        f"""
+                                        <script>
+                                        (function() {{
+                                            var nonce = {json.dumps(nonce)};
+                                            try {{
+                                                if (localStorage.getItem('s3x_ff_nonce') === nonce) return;
+                                                localStorage.setItem('s3x_ff_nonce', nonce);
+                                            }} catch (e) {{ /* storage blocked — fall through */ }}
+                                            var bootUrl = {json.dumps(boot_url)};
+                                            var w = window.open('', {json.dumps(tab_name)});
+                                            if (!w) {{
+                                                document.body.textContent =
+                                                    'Popup blocked — allow popups for this site to open Firefly.';
+                                                return;
+                                            }}
+                                            // about:blank readable → probe created a fresh
+                                            // tab; navigate it to the boot URL. Cross-origin
+                                            // access throwing → viewer already loaded there.
+                                            var blank = false;
+                                            try {{ blank = (w.location.href === 'about:blank'); }}
+                                            catch (e) {{ blank = false; }}
+                                            if (blank) {{ w.location.replace(bootUrl); }}
+                                            w.focus();
+                                        }})();
+                                        </script>
+                                        """,
+                                        height=0,
+                                    )
                                 except Exception as exc:
                                     st.error(f"Firefly error: {exc}")
                         else:
-                            st.caption("🔭 Install `firefly_client` for Firefly integration.")
+                            st.caption("🔭 Install `firefly_client` to enable Firefly.")
 
                         # Write actions
                         if can_write:
@@ -651,18 +710,6 @@ with tabs[0]:
 
             # ── Right-side preview panel ───────────────────────────
             with preview_col:
-                # Firefly result banner (shown until dismissed)
-                if st.session_state.firefly_result:
-                    res = st.session_state.firefly_result
-                    st.success(f"**🔭 Firefly ready** — `{res['name']}`")
-                    st.link_button(
-                        "Open Firefly viewer →", res["url"], use_container_width=True
-                    )
-                    if st.button("Dismiss", key="dismiss_ff"):
-                        st.session_state.firefly_result = None
-                        st.rerun()
-                    st.divider()
-
                 if st.session_state.preview_key:
                     key = st.session_state.preview_key
                     fname = key.split("/")[-1]
