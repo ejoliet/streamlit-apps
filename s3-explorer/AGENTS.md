@@ -34,8 +34,8 @@ Quick sanity check after edits: `python -c "import ast; ast.parse(open('app.py')
   the viewer is loaded there — that's expected, not an error.
 - **Unsigned (public) buckets:** S3 rejects `ResponseContent*` params on
   anonymous presigned URLs; `st.session_state.anonymous` gates this.
-- `users.yaml` is git-ignored, PBKDF2-hashed, bootstrap creds admin/admin —
-  never commit it or weaken the hashing.
+- `users.yaml` is git-ignored, PBKDF2-hashed, bootstrap creds admin/admin
+  and roman/roman (read-only) — never commit it or weaken the hashing.
 
 ## Conventions
 
