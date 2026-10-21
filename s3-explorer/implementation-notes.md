@@ -1,0 +1,4 @@
+2026-10-21 PERF: list_page/presign/fetch_head wrapped in st.cache_data (ttl 60/30/60). Why: every widget interaction reran list_objects_v2 + 100 presigns (~93 ms/100 rows measured) + preview GET. Rejected: moto-backed benchmark loop (self-improve trust declined).
+2026-10-21 PERF: per-file popover -> @st.fragment file_row; preview panel -> @st.fragment preview_panel. Why: popover clicks rerun only that row. Cross-panel actions (preview/move/delete) use st.rerun(scope="app"). Rejected: st.dataframe row-select rewrite (UX change, needs user decision).
+2026-10-21 DEVIATION: presign ttl=30 (not expiry/2) because cache_data ttl is static; min expiry is 60 s so cached URL always has >=30 s left.
+2026-10-21 PERF: added ↻ button clearing list_page + fetch_head caches, since the 60 s listing cache otherwise hides external bucket changes.

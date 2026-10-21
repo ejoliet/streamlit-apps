@@ -220,11 +220,32 @@ def list_buckets() -> list[str]:
         return []
 
 
-def list_page(bucket: str, prefix: str, page_size: int, token: Optional[str]) -> dict:
+# Cached so popover clicks / widget edits don't re-hit S3; write actions call
+# st.cache_data.clear() and the ↻ button clears it explicitly.
+@st.cache_data(show_spinner=False, ttl=60)
+def list_page(bucket: str, prefix: str, page_size: int, token: Optional[str], anonymous: bool) -> dict:
     kwargs = dict(Bucket=bucket, Prefix=prefix, Delimiter="/", MaxKeys=page_size)
     if token:
         kwargs["ContinuationToken"] = token
-    return get_client(st.session_state.anonymous).list_objects_v2(**kwargs)
+    return get_client(anonymous).list_objects_v2(**kwargs)
+
+
+# ttl must stay below the minimum presign expiry (60 s) so a cached URL is
+# never handed out already expired.
+@st.cache_data(show_spinner=False, ttl=30)
+def presign(bucket: str, key: str, expiry: int, anonymous: bool, filename: Optional[str] = None) -> str:
+    params = {"Bucket": bucket, "Key": key}
+    if filename and not anonymous:
+        params["ResponseContentDisposition"] = f'attachment; filename="{filename}"'
+    return get_client(anonymous).generate_presigned_url("get_object", Params=params, ExpiresIn=expiry)
+
+
+@st.cache_data(show_spinner=False, ttl=60)
+def fetch_head(bucket: str, key: str, anonymous: bool) -> bytes:
+    obj = get_client(anonymous).get_object(
+        Bucket=bucket, Key=key, Range=f"bytes=0-{PREVIEW_MAX_BYTES - 1}"
+    )
+    return obj["Body"].read()
 
 
 def format_bytes(size: Optional[int]) -> str:
@@ -278,12 +299,11 @@ def aws_error(exc: ClientError) -> str:
     return f"[{err.get('Code', '?')}] {err.get('Message', exc)}"
 
 
-def render_preview(client, bucket: str, key: str):
+def render_preview(bucket: str, key: str):
     """Render a file preview: dataframe for CSV/TSV, pretty JSON, or syntax-highlighted text."""
     ext = os.path.splitext(key)[1].lower()
     try:
-        obj = client.get_object(Bucket=bucket, Key=key, Range=f"bytes=0-{PREVIEW_MAX_BYTES - 1}")
-        data = obj["Body"].read()
+        data = fetch_head(bucket, key, st.session_state.anonymous)
     except ClientError as exc:
         st.error(f"Preview failed: {aws_error(exc)}")
         return
@@ -327,6 +347,172 @@ def render_preview(client, bucket: str, key: str):
             st.caption(footer)
     else:
         st.warning("Binary file — no text preview available.")
+
+
+# Fragment: clicks inside a row's popover rerun only this row, not the whole
+# listing. Actions that change other panels use st.rerun(scope="app").
+@st.fragment
+def file_row(row: dict, bucket: str):
+    client = get_client(st.session_state.anonymous)
+    name_display = row["name"] if len(row["name"]) <= 45 else row["name"][:42] + "…"
+    cols = st.columns([5, 2, 2, 1])
+    cols[0].markdown(f"📄 `{name_display}`")
+    cols[1].markdown(format_bytes(row["size"]))
+    cols[2].markdown(format_dt(row["modified"]))
+
+    with cols[3], st.popover("⋯", use_container_width=True):
+        key_display = (
+            row["key"] if len(row["key"]) <= 55 else "…" + row["key"][-52:]
+        )
+        st.caption(f"`{key_display}`")
+
+        # Preview
+        if st.button("👁 Preview", key=f"prev_{row['key']}"):
+            st.session_state.preview_key = row["key"]
+            st.rerun(scope="app")
+
+        # Presigned URL
+        if st.button("🔗 Presigned URL", key=f"url_{row['key']}"):
+            url = presign(
+                bucket, row["key"], int(st.session_state.presign_expiry), st.session_state.anonymous
+            )
+            st.code(url, language=None)
+            st.caption(f"Expires in {st.session_state.presign_expiry}s")
+
+        # Download
+        try:
+            dl_url = presign(
+                bucket,
+                row["key"],
+                int(st.session_state.presign_expiry),
+                st.session_state.anonymous,
+                filename=row["name"],
+            )
+            st.link_button("⬇ Download", dl_url, use_container_width=True)
+        except Exception as exc:
+            st.error(f"Download link failed: {exc}")
+
+        # Firefly — dispatch presigned URL via show_data, open viewer tab
+        if FIREFLY_AVAILABLE:
+            if st.button("🔭 Send to Firefly", key=f"ff_{row['key']}", use_container_width=True):
+                try:
+                    if st.session_state.anonymous:
+                        ff_data_url = f"https://{bucket}.s3.amazonaws.com/{row['key']}"
+                    else:
+                        ff_data_url = presign(
+                            bucket, row["key"], int(st.session_state.presign_expiry), False
+                        )
+                    connector = get_firefly(
+                        st.session_state.firefly_url,
+                        st.session_state.firefly_channel,
+                    )
+                    # Two delivery paths, one click:
+                    #  - tab already open → this websocket dispatch
+                    #    loads the file in it
+                    #  - tab missing → the boot URL below carries the
+                    #    load action, so the file loads on first open
+                    #    (a dispatch sent before the tab exists is lost)
+                    connector.show_url(
+                        ff_data_url, preview=True, title=row["name"]
+                    )
+                    boot_url = connector.boot_url(
+                        ff_data_url, preview=True, title=row["name"]
+                    )
+                    tab_name = f"firefly_{st.session_state.firefly_channel}"
+                    # Streamlit remounts this iframe on popover
+                    # interactions, re-running the script — the nonce
+                    # ensures the tab logic fires once per click.
+                    nonce = uuid.uuid4().hex
+                    components.html(
+                        f"""
+                        <script>
+                        (function() {{
+                            var nonce = {json.dumps(nonce)};
+                            try {{
+                                if (localStorage.getItem('s3x_ff_nonce') === nonce) return;
+                                localStorage.setItem('s3x_ff_nonce', nonce);
+                            }} catch (e) {{ /* storage blocked — fall through */ }}
+                            var bootUrl = {json.dumps(boot_url)};
+                            var w = window.open('', {json.dumps(tab_name)});
+                            if (!w) {{
+                                document.body.textContent =
+                                    'Popup blocked — allow popups for this site to open Firefly.';
+                                return;
+                            }}
+                            // about:blank readable → probe created a fresh
+                            // tab; navigate it to the boot URL. Cross-origin
+                            // access throwing → viewer already loaded there.
+                            var blank = false;
+                            try {{ blank = (w.location.href === 'about:blank'); }}
+                            catch (e) {{ blank = false; }}
+                            if (blank) {{ w.location.replace(bootUrl); }}
+                            w.focus();
+                        }})();
+                        </script>
+                        """,
+                        height=0,
+                    )
+                except Exception as exc:
+                    st.error(f"Firefly error: {exc}")
+        else:
+            st.caption("🔭 Install `firefly_client` to enable Firefly.")
+
+        # Write actions
+        if can_write:
+            st.divider()
+            new_name = st.text_input(
+                "Rename / move to key", value=row["key"], key=f"mv_{row['key']}"
+            )
+            if (
+                st.button("Move", key=f"mvbtn_{row['key']}")
+                and new_name
+                and new_name != row["key"]
+            ):
+                try:
+                    client.copy_object(
+                        Bucket=bucket,
+                        Key=new_name,
+                        CopySource={"Bucket": bucket, "Key": row["key"]},
+                    )
+                    client.delete_object(Bucket=bucket, Key=row["key"])
+                    st.success(f"Moved to `{new_name}`")
+                    st.cache_data.clear()
+                    st.rerun(scope="app")
+                except ClientError as exc:
+                    st.error(aws_error(exc))
+
+            confirm = st.checkbox("Confirm delete", key=f"cdel_{row['key']}")
+            if st.button(
+                "🗑 Delete", key=f"del_{row['key']}", disabled=not confirm
+            ):
+                try:
+                    client.delete_object(Bucket=bucket, Key=row["key"])
+                    st.success(f"Deleted `{row['key']}`")
+                    st.cache_data.clear()
+                    st.rerun(scope="app")
+                except ClientError as exc:
+                    st.error(aws_error(exc))
+
+
+# Fragment: open/close preview without rerunning the file list.
+@st.fragment
+def preview_panel(bucket: str):
+    if st.session_state.preview_key:
+        key = st.session_state.preview_key
+        fname = key.split("/")[-1]
+        hc1, hc2 = st.columns([8, 1])
+        hc1.markdown(f"**👁 {fname}**")
+        if hc2.button("✕", key="close_preview", help="Close preview"):
+            st.session_state.preview_key = None
+            st.rerun()
+        st.caption(f"`{key}`")
+        render_preview(bucket, key)
+    else:
+        st.info(
+            "👁 **File preview**\n\n"
+            "Select a file from the list and click **Preview** "
+            "to view its contents here."
+        )
 
 
 # ──────────────────────────────────────────────────────────────
@@ -450,7 +636,13 @@ with tabs[0]:
 
         resp = None
         try:
-            resp = list_page(bucket, server_prefix, int(st.session_state.page_size), st.session_state.token)
+            resp = list_page(
+                bucket,
+                server_prefix,
+                int(st.session_state.page_size),
+                st.session_state.token,
+                st.session_state.anonymous,
+            )
         except ClientError as exc:
             st.error(f"S3 error: {aws_error(exc)}")
         except Exception as exc:
@@ -461,13 +653,16 @@ with tabs[0]:
             has_prev = bool(st.session_state.token_stack)
 
             with pcol:
-                b1, b2 = st.columns(2)
+                b1, b2, b3 = st.columns(3)
                 if b1.button("◀", disabled=not has_prev, use_container_width=True, help="Previous page"):
                     st.session_state.token = st.session_state.token_stack.pop()
                     st.rerun()
                 if b2.button("▶", disabled=not next_token, use_container_width=True, help="Next page"):
                     st.session_state.token_stack.append(st.session_state.token)
                     st.session_state.token = next_token
+                    st.rerun()
+                if b3.button("↻", use_container_width=True, help="Refresh listing (cached 60 s)"):
+                    st.cache_data.clear()
                     st.rerun()
 
             # Parse folders and files
@@ -507,6 +702,7 @@ with tabs[0]:
                                 except ClientError as exc:
                                     st.error(f"Upload of {f.name} failed: {aws_error(exc)}")
                             st.cache_data.clear()
+                            st.rerun()
                     with folder_col:
                         new_folder = st.text_input("New folder name")
                         if new_folder and st.button("Create folder"):
@@ -515,6 +711,7 @@ with tabs[0]:
                                 client.put_object(Bucket=bucket, Key=folder_key)
                                 st.success(f"Created `{folder_key}`")
                                 st.cache_data.clear()
+                                st.rerun()
                             except ClientError as exc:
                                 st.error(f"Create folder failed: {aws_error(exc)}")
 
@@ -542,151 +739,7 @@ with tabs[0]:
                     cols[2].markdown("—")
 
                 for row in files:
-                    name_display = row["name"] if len(row["name"]) <= 45 else row["name"][:42] + "…"
-                    cols = st.columns([5, 2, 2, 1])
-                    cols[0].markdown(f"📄 `{name_display}`")
-                    cols[1].markdown(format_bytes(row["size"]))
-                    cols[2].markdown(format_dt(row["modified"]))
-
-                    with cols[3], st.popover("⋯", use_container_width=True):
-                        key_display = (
-                            row["key"] if len(row["key"]) <= 55 else "…" + row["key"][-52:]
-                        )
-                        st.caption(f"`{key_display}`")
-
-                        # Preview
-                        if st.button("👁 Preview", key=f"prev_{row['key']}"):
-                            st.session_state.preview_key = row["key"]
-                            st.rerun()
-
-                        # Presigned URL
-                        if st.button("🔗 Presigned URL", key=f"url_{row['key']}"):
-                            url = client.generate_presigned_url(
-                                "get_object",
-                                Params={"Bucket": bucket, "Key": row["key"]},
-                                ExpiresIn=int(st.session_state.presign_expiry),
-                            )
-                            st.code(url, language=None)
-                            st.caption(f"Expires in {st.session_state.presign_expiry}s")
-
-                        # Download
-                        try:
-                            dl_params = {"Bucket": bucket, "Key": row["key"]}
-                            if not st.session_state.anonymous:
-                                dl_params["ResponseContentDisposition"] = (
-                                    f'attachment; filename="{row["name"]}"'
-                                )
-                            dl_url = client.generate_presigned_url(
-                                "get_object",
-                                Params=dl_params,
-                                ExpiresIn=int(st.session_state.presign_expiry),
-                            )
-                            st.link_button("⬇ Download", dl_url, use_container_width=True)
-                        except Exception as exc:
-                            st.error(f"Download link failed: {exc}")
-
-                        # Firefly — dispatch presigned URL via show_data, open viewer tab
-                        if FIREFLY_AVAILABLE:
-                            if st.button("🔭 Send to Firefly", key=f"ff_{row['key']}", use_container_width=True):
-                                try:
-                                    if st.session_state.anonymous:
-                                        ff_data_url = f"https://{bucket}.s3.amazonaws.com/{row['key']}"
-                                    else:
-                                        ff_data_url = client.generate_presigned_url(
-                                            "get_object",
-                                            Params={"Bucket": bucket, "Key": row["key"]},
-                                            ExpiresIn=int(st.session_state.presign_expiry),
-                                        )
-                                    connector = get_firefly(
-                                        st.session_state.firefly_url,
-                                        st.session_state.firefly_channel,
-                                    )
-                                    # Two delivery paths, one click:
-                                    #  - tab already open → this websocket dispatch
-                                    #    loads the file in it
-                                    #  - tab missing → the boot URL below carries the
-                                    #    load action, so the file loads on first open
-                                    #    (a dispatch sent before the tab exists is lost)
-                                    connector.show_url(
-                                        ff_data_url, preview=True, title=row["name"]
-                                    )
-                                    boot_url = connector.boot_url(
-                                        ff_data_url, preview=True, title=row["name"]
-                                    )
-                                    tab_name = f"firefly_{st.session_state.firefly_channel}"
-                                    # Streamlit remounts this iframe on popover
-                                    # interactions, re-running the script — the nonce
-                                    # ensures the tab logic fires once per click.
-                                    nonce = uuid.uuid4().hex
-                                    components.html(
-                                        f"""
-                                        <script>
-                                        (function() {{
-                                            var nonce = {json.dumps(nonce)};
-                                            try {{
-                                                if (localStorage.getItem('s3x_ff_nonce') === nonce) return;
-                                                localStorage.setItem('s3x_ff_nonce', nonce);
-                                            }} catch (e) {{ /* storage blocked — fall through */ }}
-                                            var bootUrl = {json.dumps(boot_url)};
-                                            var w = window.open('', {json.dumps(tab_name)});
-                                            if (!w) {{
-                                                document.body.textContent =
-                                                    'Popup blocked — allow popups for this site to open Firefly.';
-                                                return;
-                                            }}
-                                            // about:blank readable → probe created a fresh
-                                            // tab; navigate it to the boot URL. Cross-origin
-                                            // access throwing → viewer already loaded there.
-                                            var blank = false;
-                                            try {{ blank = (w.location.href === 'about:blank'); }}
-                                            catch (e) {{ blank = false; }}
-                                            if (blank) {{ w.location.replace(bootUrl); }}
-                                            w.focus();
-                                        }})();
-                                        </script>
-                                        """,
-                                        height=0,
-                                    )
-                                except Exception as exc:
-                                    st.error(f"Firefly error: {exc}")
-                        else:
-                            st.caption("🔭 Install `firefly_client` to enable Firefly.")
-
-                        # Write actions
-                        if can_write:
-                            st.divider()
-                            new_name = st.text_input(
-                                "Rename / move to key", value=row["key"], key=f"mv_{row['key']}"
-                            )
-                            if (
-                                st.button("Move", key=f"mvbtn_{row['key']}")
-                                and new_name
-                                and new_name != row["key"]
-                            ):
-                                try:
-                                    client.copy_object(
-                                        Bucket=bucket,
-                                        Key=new_name,
-                                        CopySource={"Bucket": bucket, "Key": row["key"]},
-                                    )
-                                    client.delete_object(Bucket=bucket, Key=row["key"])
-                                    st.success(f"Moved to `{new_name}`")
-                                    st.cache_data.clear()
-                                    st.rerun()
-                                except ClientError as exc:
-                                    st.error(aws_error(exc))
-
-                            confirm = st.checkbox("Confirm delete", key=f"cdel_{row['key']}")
-                            if st.button(
-                                "🗑 Delete", key=f"del_{row['key']}", disabled=not confirm
-                            ):
-                                try:
-                                    client.delete_object(Bucket=bucket, Key=row["key"])
-                                    st.success(f"Deleted `{row['key']}`")
-                                    st.cache_data.clear()
-                                    st.rerun()
-                                except ClientError as exc:
-                                    st.error(aws_error(exc))
+                    file_row(row, bucket)
 
                 # Footer pagination
                 st.divider()
@@ -710,22 +763,7 @@ with tabs[0]:
 
             # ── Right-side preview panel ───────────────────────────
             with preview_col:
-                if st.session_state.preview_key:
-                    key = st.session_state.preview_key
-                    fname = key.split("/")[-1]
-                    hc1, hc2 = st.columns([8, 1])
-                    hc1.markdown(f"**👁 {fname}**")
-                    if hc2.button("✕", key="close_preview", help="Close preview"):
-                        st.session_state.preview_key = None
-                        st.rerun()
-                    st.caption(f"`{key}`")
-                    render_preview(client, bucket, key)
-                else:
-                    st.info(
-                        "👁 **File preview**\n\n"
-                        "Select a file from the list and click **Preview** "
-                        "to view its contents here."
-                    )
+                preview_panel(bucket)
 
 
 # ══════════════════════════════════════════════════════════════
